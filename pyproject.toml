@@ -95,4 +95,5 @@ dev = [
     "ruff>=0.15.11",
     "httpx",
     "types-requests",
+    "twine>=6.2.0",
 ]
