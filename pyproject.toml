@@ -10,4 +10,9 @@ dependencies = ["fastapi", "uvicorn", "requests", "pytest"]
 
 [project.scripts]
 stest = "sprintest.cli:main"
+sprintest = "sprintest.cli:main"
 stest-daemon = "sprintest.daemon:run"
+sprintest-daemon = "sprintest.daemon:run"
+
+[tool.setuptools]
+packages = ["sprintest"]
