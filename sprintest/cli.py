@@ -22,9 +22,17 @@ def main():
             i += 1
 
     payload = {"args": args, "target_pkg": target_pkg}
-
-    response = requests.post(DAEMON_URL, json=payload)
-    response.raise_for_status()
+    try:
+        response = requests.post(DAEMON_URL, json=payload, timeout=30)
+        response.raise_for_status()
+    except requests.exceptions.ConnectionError:
+        print(
+            "Error: Sprintest Daemon not found. Please start it with 'sprintest-daemon'."
+        )
+        sys.exit(1)
+    except requests.exceptions.RequestException as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 
     data = response.json()
     print(data["output"])
