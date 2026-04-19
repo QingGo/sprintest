@@ -1,13 +1,13 @@
 import os
 import sys
 
-import requests
+import requests  # type: ignore
 
 PORT = os.environ.get("SPRINTEST_PORT", "8000")
 DAEMON_URL = f"http://localhost:{PORT}/v1/test/run"
 
 
-def main():
+def main() -> None:
     args = sys.argv[1:]
     target_pkg = os.environ.get("SPRINTEST_TARGET_PKG")
 

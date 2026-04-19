@@ -7,7 +7,7 @@ import threading
 from contextlib import redirect_stderr, redirect_stdout
 
 import pytest
-import uvicorn
+import uvicorn  # type: ignore
 from fastapi import FastAPI
 from pydantic import BaseModel
 
@@ -21,6 +21,31 @@ class TestRunResponse(BaseModel):
     exit_code: int
     output: str
     nuked_modules_count: int
+
+
+def clean_ansi(text: str) -> str:
+    """Strip ANSI escape codes from text."""
+    ansi_escape = re.compile(r"\x1b\[[0-9;]*[mK]")
+    return ansi_escape.sub("", text)
+
+
+def prepare_pytest_args(args: list[str]) -> list[str]:
+    """Force --color=no and add common warning filters to pytest arguments."""
+    pytest_args = args.copy()
+
+    # Force --color=no
+    color_found = False
+    for i, arg in enumerate(pytest_args):
+        if arg.startswith("--color="):
+            pytest_args[i] = "--color=no"
+            color_found = True
+            break
+    if not color_found:
+        pytest_args.append("--color=no")
+
+    # Suppress the anyio assert rewrite warning
+    pytest_args.extend(["-W", "ignore::pytest.PytestAssertRewriteWarning"])
+    return pytest_args
 
 
 def nuke_modules(target_pkg: str | None) -> int:
@@ -39,7 +64,9 @@ def nuke_modules(target_pkg: str | None) -> int:
         file_path = getattr(mod, "__file__", "")
         if file_path:
             abs_file_path = os.path.abspath(file_path)
-            if abs_file_path.startswith(root) and not abs_file_path.startswith(venv_dir):
+            if abs_file_path.startswith(root) and not abs_file_path.startswith(
+                venv_dir
+            ):
                 modules_to_delete.append(name)
                 continue
 
@@ -54,8 +81,8 @@ def nuke_modules(target_pkg: str | None) -> int:
         if name in sys.modules:
             del sys.modules[name]
 
-    # Invalidate import caches to force re-reading from disk
-    importlib.invalidate_caches()
+    if modules_to_delete:
+        importlib.invalidate_caches()
     return len(modules_to_delete)
 
 
@@ -90,20 +117,7 @@ def run_test(request: TestRunRequest) -> TestRunResponse:
             nuked_count = nuke_modules(target_pkg)
 
             # 1. Process pytest arguments
-            pytest_args = request.args.copy()
-
-            # Force --color=no
-            color_found = False
-            for i, arg in enumerate(pytest_args):
-                if arg.startswith("--color="):
-                    pytest_args[i] = "--color=no"
-                    color_found = True
-                    break
-            if not color_found:
-                pytest_args.append("--color=no")
-
-            # Suppress the anyio assert rewrite warning
-            pytest_args.extend(["-W", "ignore::pytest.PytestAssertRewriteWarning"])
+            pytest_args = prepare_pytest_args(request.args)
 
             stdout_buf = io.StringIO()
             stderr_buf = io.StringIO()
@@ -113,10 +127,7 @@ def run_test(request: TestRunRequest) -> TestRunResponse:
 
             # 2. Extract and purify output
             raw_output = stdout_buf.getvalue() + stderr_buf.getvalue()
-
-            # Final safety net: Strip ANSI escape codes using regex
-            ansi_escape = re.compile(r"\x1b\[[0-9;]*[mK]")
-            clean_output = ansi_escape.sub("", raw_output)
+            clean_output = clean_ansi(raw_output)
 
             return TestRunResponse(
                 exit_code=exit_code,
@@ -132,7 +143,7 @@ def run_test(request: TestRunRequest) -> TestRunResponse:
         test_lock.release()
 
 
-def run():
+def run() -> None:
     port_str = os.environ.get("SPRINTEST_PORT", "8000")
     port = int(port_str)
     if os.getcwd() not in sys.path:

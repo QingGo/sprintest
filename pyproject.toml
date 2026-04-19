@@ -21,8 +21,8 @@ stest-daemon = "sprintest.daemon:run"
 sprintest-daemon = "sprintest.daemon:run"
 
 [tool.setuptools]
+package-dir = { "" = "src" }
 packages = ["sprintest"]
-
 
 [tool.mypy]
 python_version = "3.10"
@@ -33,14 +33,7 @@ exclude = ["\\.venv", "build", "dist"]
 
 [[tool.mypy.overrides]]
 module = [
-    "tqdm.*",
-    "sympy.*",
-    "tokenizers.*",
-    "datasets.*",
-    "matplotlib.*",
-    "seaborn.*",
-    "scipy.*",
-    "pandas.*",
+    "uvicorn.*",
 ]
 ignore_missing_imports = true
 
@@ -68,7 +61,7 @@ ignore = ["E501"]
 "tests/*" = ["F811", "F401", "B011", "PLC0415"]
 
 [tool.pyright]
-include = ["sprintest"]
+include = ["src/sprintest"]
 exclude = ["tests"]
 reportMissingTypeStubs = false
 executionEnvironments = [
@@ -79,4 +72,6 @@ executionEnvironments = [
 dev = [
     "mypy>=1.10.0",
     "ruff>=0.15.11",
+    "httpx",
+    "types-requests",
 ]

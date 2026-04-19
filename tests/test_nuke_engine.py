@@ -3,10 +3,10 @@ import subprocess
 import time
 
 import pytest
-import requests
+import requests  # type: ignore
 
 
-def test_nuke_engine_hot_reload():
+def test_nuke_engine_hot_reload() -> None:
     """
     Integration test to verify that the Nuke Engine correctly handles
     hot-reloading even across multiple file reverts.
@@ -23,11 +23,11 @@ def test_nuke_engine_hot_reload():
     with open(f"{test_pkg}/__init__.py", "w") as f:
         f.write("")
 
-    def set_version(v):
+    def set_version(v: int) -> None:
         with open(module_file, "w") as f:
             f.write(f"VERSION = {v}\n")
 
-    def set_test(v):
+    def set_test(v: int) -> None:
         with open(test_file, "w") as f:
             f.write(f"from {test_pkg}.module import VERSION\n")
             f.write(f"def test_v(): assert VERSION == {v}\n")
@@ -36,12 +36,16 @@ def test_nuke_engine_hot_reload():
     port = 8001
     env = os.environ.copy()
     env["SPRINTEST_PORT"] = str(port)
+    env["PYTHONPATH"] = os.path.join(project_root, "src")
     # Use python to run the daemon entry point
     daemon_proc = subprocess.Popen(
         [".venv/bin/python", "-c", "from sprintest.daemon import run; run()"],
         env=env,
         cwd=project_root,
     )
+
+    # Set target_pkg in env for the CLI runs below
+    env["SPRINTEST_TARGET_PKG"] = test_pkg
 
     try:
         # Wait for daemon to start
@@ -56,15 +60,15 @@ def test_nuke_engine_hot_reload():
                 "-c",
                 "from sprintest.cli import main; main()",
                 test_file,
-                "--target_pkg",
-                test_pkg,
             ],
             env=env,
             cwd=project_root,
             capture_output=True,
-            text=True
+            text=True,
         )
-        assert res.returncode == 0, f"Initial run should pass. Output: {res.stdout}\nError: {res.stderr}"
+        assert res.returncode == 0, (
+            f"Initial run should pass. Output: {res.stdout}\nError: {res.stderr}"
+        )
 
         # Step 2: VERSION = 2, Test assert 1 -> Should Fail with assert 2 == 1
         set_version(2)
@@ -74,15 +78,15 @@ def test_nuke_engine_hot_reload():
                 "-c",
                 "from sprintest.cli import main; main()",
                 test_file,
-                "--target_pkg",
-                test_pkg,
             ],
             env=env,
             cwd=project_root,
             capture_output=True,
-            text=True
+            text=True,
         )
-        assert res.returncode != 0, f"Run after change to 2 should fail. Output: {res.stdout}"
+        assert res.returncode != 0, (
+            f"Run after change to 2 should fail. Output: {res.stdout}"
+        )
 
         # Step 3: VERSION = 1, Test assert 1 -> Should Pass again (The Revert Scenario)
         set_version(1)
@@ -98,7 +102,7 @@ def test_nuke_engine_hot_reload():
             env=env,
             cwd=project_root,
             capture_output=True,
-            text=True
+            text=True,
         )
         assert res.returncode == 0, (
             f"Run after revert to 1 should pass. Output: {res.stdout}\nError: {res.stderr}"
