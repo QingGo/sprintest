@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import io
 import os
@@ -5,11 +6,13 @@ import re
 import sys
 import threading
 import time
+from collections.abc import AsyncGenerator
 from contextlib import redirect_stderr, redirect_stdout
 
 import pytest
 import uvicorn  # type: ignore
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from sprintest import __version__
@@ -32,21 +35,19 @@ def clean_ansi(text: str) -> str:
     return ansi_escape.sub("", text)
 
 
-def prepare_pytest_args(args: list[str]) -> list[str]:
-    """Force --color=no and add common warning filters to pytest arguments."""
-    pytest_args = args.copy()
+def prepare_pytest_args(args: list[str], enable_color: bool = False) -> list[str]:
+    """Force --color=no (or yes if enable_color=True) and add common warning filters to pytest arguments."""
+    pytest_args: list[str] = args.copy()
 
-    # Force --color=no
     color_found = False
     for i, arg in enumerate(pytest_args):
         if arg.startswith("--color="):
-            pytest_args[i] = "--color=no"
+            pytest_args[i] = "--color=yes" if enable_color else "--color=no"
             color_found = True
             break
     if not color_found:
-        pytest_args.append("--color=no")
+        pytest_args.append("--color=yes" if enable_color else "--color=no")
 
-    # Suppress the anyio assert rewrite warning
     pytest_args.extend(["-W", "ignore::pytest.PytestAssertRewriteWarning"])
     return pytest_args
 
@@ -57,7 +58,7 @@ def nuke_modules(target_pkg: str | None) -> int:
     root = os.path.abspath(os.getcwd())
     venv_dir = os.path.join(root, ".venv")
 
-    modules_to_delete = []
+    modules_to_delete: list[str] = []
     for name, mod in list(sys.modules.items()):
         # skip our own package to avoid nuking the executing code
         if name == "sprintest" or name.startswith("sprintest."):
@@ -94,6 +95,62 @@ app = FastAPI()
 
 # Global lock to prevent concurrent pytest execution
 test_lock = threading.Lock()
+
+
+@app.post("/v1/test/run/stream")
+async def run_test_stream(request: TestRunRequest) -> StreamingResponse:
+    """Stream test execution output in real-time."""
+    if not test_lock.acquire(blocking=False):
+        error_msg = "Error: Daemon is busy. Please try again later.\n"
+        return StreamingResponse(
+            iter([error_msg]),
+            media_type="text/plain",
+            status_code=503,
+        )
+
+    async def generate() -> AsyncGenerator[bytes, None]:
+        try:
+            target_pkg = request.target_pkg or os.environ.get("SPRINTEST_TARGET_PKG")
+            if not target_pkg:
+                yield b"Error: target_pkg missing. Set SPRINTEST_TARGET_PKG environment variable or provide it in the request.\n"
+                yield b"[DONE]\n"
+                return
+
+            # Clean modules before starting subprocess
+            nuked_count = nuke_modules(target_pkg)
+            yield f"[STARTED] nuked {nuked_count} modules\n".encode()
+
+            pytest_args = prepare_pytest_args(request.args, enable_color=True)
+
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "pytest",
+                *pytest_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            )
+
+            stdout = process.stdout
+            if stdout is not None:
+                while True:
+                    line = await stdout.readline()
+                    if not line:
+                        break
+                    decoded_line = line.decode("utf-8", errors="replace")
+                    clean_line = clean_ansi(decoded_line)
+                    yield clean_line.encode()
+
+            exit_code = await process.wait()
+            yield f"\n[DONE] exit_code={exit_code}\n".encode()
+
+        except Exception as e:
+            yield f"Error: {e}\n".encode()
+        finally:
+            test_lock.release()
+
+    return StreamingResponse(content=generate(), media_type="text/plain")
 
 
 @app.post("/v1/test/run")

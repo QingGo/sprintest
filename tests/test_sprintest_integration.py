@@ -67,7 +67,6 @@ def daemon_process() -> Generator[dict[str, Any], None, None]:
 
 def test_basic_run(daemon_process: dict[str, Any]) -> None:
     """Verify simple communication between CLI and Daemon."""
-    # Create a dummy test file
     test_content = "def test_pass(): assert 1 + 1 == 2\n"
     with open("tests/tmp_test_basic.py", "w") as f:
         f.write(test_content)
@@ -80,6 +79,7 @@ def test_basic_run(daemon_process: dict[str, Any]) -> None:
                 ".venv/bin/python",
                 "-c",
                 "from sprintest.cli import main; main()",
+                "--no-stream",
                 "tests/tmp_test_basic.py",
             ],
             env=env,
@@ -113,6 +113,7 @@ def test_io():
                 ".venv/bin/python",
                 "-c",
                 "from sprintest.cli import main; main()",
+                "--no-stream",
                 "tests/tmp_test_io.py",
                 "-s",
             ],
@@ -129,9 +130,6 @@ def test_io():
 
 def test_ansi_purification(daemon_process: dict[str, Any]) -> None:
     """Verify that ANSI escape codes are stripped from the output."""
-    # Pytest usually outputs color codes even with --color=yes if we trick it,
-    # but our daemon forces --color=no.
-    # We can check if typical reset codes like \x1b[0m are absent.
     test_content = "def test_fail(): assert False\n"
     with open("tests/tmp_test_ansi.py", "w") as f:
         f.write(test_content)
@@ -144,13 +142,13 @@ def test_ansi_purification(daemon_process: dict[str, Any]) -> None:
                 ".venv/bin/python",
                 "-c",
                 "from sprintest.cli import main; main()",
+                "--no-stream",
                 "tests/tmp_test_ansi.py",
             ],
             env=env,
             capture_output=True,
             text=True,
         )
-        # Check for presence of ANSI escape codes
         ansi_escape = re.compile(r"\x1b\[[0-9;]*[mK]")
         assert not ansi_escape.search(res.stdout), "ANSI escape codes found in output"
     finally:
@@ -166,15 +164,14 @@ def test_concurrency_lock(daemon_process: dict[str, Any]) -> None:
 
     try:
         env = daemon_process["env"].copy()
-        # Set target_pkg explicitly in env for both cliff and daemon to avoid missing pkg errors
         env["SPRINTEST_TARGET_PKG"] = "sprintest"
 
-        # Start first test in background
         proc1 = subprocess.Popen(
             [
                 ".venv/bin/python",
                 "-c",
                 "from sprintest.cli import main; main()",
+                "--no-stream",
                 "tests/tmp_test_sleep.py",
             ],
             env=env,
@@ -183,8 +180,6 @@ def test_concurrency_lock(daemon_process: dict[str, Any]) -> None:
             text=True,
         )
 
-        # Wait longer to ensure the first request has reached the daemon and acquired the lock
-        # Pytest startup can be slow
         time.sleep(1.5)
 
         res2 = subprocess.run(
@@ -192,6 +187,7 @@ def test_concurrency_lock(daemon_process: dict[str, Any]) -> None:
                 ".venv/bin/python",
                 "-c",
                 "from sprintest.cli import main; main()",
+                "--no-stream",
                 "tests/tmp_test_sleep.py",
             ],
             env=env,
@@ -199,7 +195,6 @@ def test_concurrency_lock(daemon_process: dict[str, Any]) -> None:
             text=True,
         )
 
-        # Before asserting, wait for proc1 to finish so we can see its output if it failed
         stdout1, stderr1 = proc1.communicate()
 
         assert "Error: Daemon is busy" in res2.stdout, (
@@ -240,3 +235,105 @@ def test_environment_variables(daemon_process: dict[str, Any]) -> None:
     finally:
         if os.path.exists("tests/tmp_test_env.py"):
             os.remove("tests/tmp_test_env.py")
+
+
+def test_stream_endpoint(daemon_process: dict[str, Any]) -> None:
+    """Verify streaming endpoint works and returns output in chunks."""
+    test_content = "def test_pass(): assert 1 + 1 == 2\n"
+    with open("tests/tmp_test_stream.py", "w") as f:
+        f.write(test_content)
+
+    try:
+        env = daemon_process["env"].copy()
+        env["SPRINTEST_TARGET_PKG"] = "sprintest"
+        res = subprocess.run(
+            [
+                ".venv/bin/python",
+                "-c",
+                "from sprintest.cli import main; main()",
+                "tests/tmp_test_stream.py",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 0
+        assert "[STARTED]" in res.stdout
+        assert "[DONE]" in res.stdout
+        assert "passed" in res.stdout
+    finally:
+        if os.path.exists("tests/tmp_test_stream.py"):
+            os.remove("tests/tmp_test_stream.py")
+
+
+def test_stream_concurrency_lock(daemon_process: dict[str, Any]) -> None:
+    """Verify that streaming endpoint also respects the concurrency lock."""
+    test_content = "import time\ndef test_sleep():\n    time.sleep(2)\n"
+    with open("tests/tmp_test_stream_sleep.py", "w") as f:
+        f.write(test_content)
+
+    try:
+        env = daemon_process["env"].copy()
+        env["SPRINTEST_TARGET_PKG"] = "sprintest"
+
+        proc1 = subprocess.Popen(
+            [
+                ".venv/bin/python",
+                "-c",
+                "from sprintest.cli import main; main()",
+                "tests/tmp_test_stream_sleep.py",
+            ],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        time.sleep(1.5)
+
+        res2 = subprocess.run(
+            [
+                ".venv/bin/python",
+                "-c",
+                "from sprintest.cli import main; main()",
+                "tests/tmp_test_stream_sleep.py",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        stdout1, stderr1 = proc1.communicate()
+
+        assert "Daemon is busy" in res2.stdout or "503" in res2.stdout
+        assert res2.returncode == 1
+    finally:
+        if os.path.exists("tests/tmp_test_stream_sleep.py"):
+            os.remove("tests/tmp_test_stream_sleep.py")
+
+
+def test_stream_missing_target_pkg(daemon_process: dict[str, Any]) -> None:
+    """Verify streaming endpoint returns error when target_pkg is missing."""
+    test_content = "def test_pass(): assert True\n"
+    with open("tests/tmp_test_stream_no_pkg.py", "w") as f:
+        f.write(test_content)
+
+    try:
+        env = daemon_process["env"].copy()
+        env.pop("SPRINTEST_TARGET_PKG", None)
+        res = subprocess.run(
+            [
+                ".venv/bin/python",
+                "-c",
+                "from sprintest.cli import main; main()",
+                "--stream",
+                "tests/tmp_test_stream_no_pkg.py",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert "Error: target_pkg missing" in res.stdout
+    finally:
+        if os.path.exists("tests/tmp_test_stream_no_pkg.py"):
+            os.remove("tests/tmp_test_stream_no_pkg.py")

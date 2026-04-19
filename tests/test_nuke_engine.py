@@ -2,9 +2,6 @@ import os
 import subprocess
 import time
 
-import pytest
-import requests  # type: ignore
-
 
 def test_nuke_engine_hot_reload() -> None:
     """
@@ -96,8 +93,6 @@ def test_nuke_engine_hot_reload() -> None:
                 "-c",
                 "from sprintest.cli import main; main()",
                 test_file,
-                "--target_pkg",
-                test_pkg,
             ],
             env=env,
             cwd=project_root,

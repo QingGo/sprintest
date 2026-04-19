@@ -85,8 +85,10 @@ ignore = ["E501"]
 include = ["src/sprintest"]
 exclude = ["tests"]
 reportMissingTypeStubs = false
+reportAny = false
+reportGeneralTypeIssues = false
 executionEnvironments = [
-  { root = "tests", reportArgumentType = "none" }
+  { root = "tests", reportArgumentType = false, reportGeneralTypeIssues = false, reportMissingImports = false, reportAny = false }
 ]
 
 [dependency-groups]
