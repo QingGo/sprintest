@@ -195,6 +195,12 @@ is_test_running = False
 # Lock for protecting access to is_test_running
 is_test_running_lock = threading.Lock()
 
+# Flag to track if this is the first test run (to preserve pre-loaded modules)
+first_test_run = True
+
+# Lock for protecting access to first_test_run
+first_test_run_lock = threading.Lock()
+
 
 @app.post("/v1/test/run/stream")
 async def run_test_stream(request: TestRunRequest) -> StreamingResponse:
@@ -234,8 +240,17 @@ async def run_test_stream(request: TestRunRequest) -> StreamingResponse:
             media_type="text/plain",
         )
 
-    # Clean modules before running tests
-    nuked_count = nuke_modules(target_pkg)
+    # Clean modules before running tests, but skip on first run to preserve pre-loaded modules
+    global first_test_run
+    with first_test_run_lock:
+        if first_test_run:
+            nuked_count = 0
+            print(
+                "[INFO] Skipping module cleanup on first run to preserve pre-loaded modules"
+            )
+            first_test_run = False
+        else:
+            nuked_count = nuke_modules(target_pkg)
 
     pytest_args = prepare_pytest_args(request.args, enable_color=True)
 
@@ -308,7 +323,17 @@ def run_test(request: TestRunRequest) -> TestRunResponse:
                     nuked_modules_count=0,
                 )
 
-            nuked_count = nuke_modules(target_pkg)
+            # Clean modules before running tests, but skip on first run to preserve pre-loaded modules
+            global first_test_run
+            with first_test_run_lock:
+                if first_test_run:
+                    nuked_count = 0
+                    print(
+                        "[INFO] Skipping module cleanup on first run to preserve pre-loaded modules"
+                    )
+                    first_test_run = False
+                else:
+                    nuked_count = nuke_modules(target_pkg)
 
             # 1. Process pytest arguments
             pytest_args = prepare_pytest_args(request.args)
@@ -360,4 +385,14 @@ def run() -> None:
     port = int(port_str)
     if os.getcwd() not in sys.path:
         sys.path.insert(0, os.getcwd())
+
+    # Pre-load target package if SPRINTEST_TARGET_PKG is set
+    target_pkg = os.environ.get("SPRINTEST_TARGET_PKG")
+    if target_pkg:
+        try:
+            importlib.import_module(target_pkg)
+            print(f"[INFO] Pre-loaded target package: {target_pkg}")
+        except ImportError as e:
+            print(f"[WARNING] Failed to pre-load target package {target_pkg}: {e}")
+
     uvicorn.run(app, host="0.0.0.0", port=port)

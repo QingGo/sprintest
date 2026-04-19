@@ -53,5 +53,5 @@ sprintest-daemon
 为了确保稳定性，Sprintest 包含集成测试。使用标准的 pytest 运行：
 
 ```bash
-pytest tests/test_sprintest_integration.py
+uv run pytest tests
 ```
