@@ -1,5 +1,7 @@
 # Sprintest
 
+[English] | [简体中文](README_zh.md)
+
 Sprintest is a Client-Server (C/S) architecture test runner designed for heavy AI projects. It addresses the slow startup times of large models and datasets by keeping them preloaded in memory.
 
 ## Core Advantages
@@ -12,7 +14,7 @@ Sprintest is a Client-Server (C/S) architecture test runner designed for heavy A
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-repo/sprintest.git
+git clone https://github.com/QingGo/sprintest.git
 cd sprintest
 
 # Install in editable mode

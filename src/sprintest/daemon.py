@@ -4,12 +4,15 @@ import os
 import re
 import sys
 import threading
+import time
 from contextlib import redirect_stderr, redirect_stdout
 
 import pytest
 import uvicorn  # type: ignore
 from fastapi import FastAPI
 from pydantic import BaseModel
+
+from sprintest import __version__
 
 
 class TestRunRequest(BaseModel):
@@ -141,6 +144,22 @@ def run_test(request: TestRunRequest) -> TestRunResponse:
     finally:
         # Always release the lock, even if an exception occurs
         test_lock.release()
+
+
+@app.get("/v1/status")
+def status() -> dict[str, str]:
+
+    return {"status": "running", "version": __version__}
+
+
+@app.post("/v1/stop")
+def stop() -> dict[str, str]:
+    def shutdown() -> None:
+        time.sleep(0.5)
+        os._exit(0)
+
+    threading.Thread(target=shutdown, daemon=True).start()
+    return {"message": "Sprintest Daemon is shutting down..."}
 
 
 def run() -> None:

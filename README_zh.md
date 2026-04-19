@@ -1,5 +1,7 @@
 # Sprintest
 
+[简体中文] | [English](README.md)
+
 Sprintest 是一个专门为重型 AI 项目设计的 C/S（客户端-服务端）架构测试运行器。它通过将大型模型和数据集保留在内存中，解决了由于加载缓慢导致的测试启动延迟问题。
 
 ## 核心优势
@@ -12,7 +14,7 @@ Sprintest 是一个专门为重型 AI 项目设计的 C/S（客户端-服务端�
 
 ```bash
 # 克隆仓库
-git clone https://github.com/your-repo/sprintest.git
+git clone https://github.com/QingGo/sprintest.git
 cd sprintest
 
 # 以可编辑模式安装
