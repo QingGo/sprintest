@@ -389,10 +389,147 @@ def run() -> None:
     # Pre-load target package if SPRINTEST_TARGET_PKG is set
     target_pkg = os.environ.get("SPRINTEST_TARGET_PKG")
     if target_pkg:
-        try:
-            importlib.import_module(target_pkg)
-            print(f"[INFO] Pre-loaded target package: {target_pkg}")
-        except ImportError as e:
-            print(f"[WARNING] Failed to pre-load target package {target_pkg}: {e}")
+        # Convert hyphens to underscores for package name (Python convention)
+        pkg_name = target_pkg.replace("-", "_")
+
+        # Check if user specified a direct path to the package
+        target_pkg_path = os.environ.get("SPRINTEST_TARGET_PKG_PATH")
+        if target_pkg_path:
+            print(f"[INFO] Using user-specified package path: {target_pkg_path}")
+            if target_pkg_path not in sys.path:
+                sys.path.insert(0, target_pkg_path)
+                print(f"[INFO] Added {target_pkg_path} to sys.path")
+            # Try to import the package
+            try:
+                importlib.import_module(pkg_name)
+                print(
+                    f"[INFO] Pre-loaded target package: {pkg_name} (from specified path)"
+                )
+            except ImportError as e:
+                print(
+                    f"[WARNING] Failed to pre-load target package {pkg_name} from specified path: {e}"
+                )
+        else:
+            # Try to import the package directly
+            try:
+                importlib.import_module(pkg_name)
+                print(
+                    f"[INFO] Pre-loaded target package: {pkg_name} (from {target_pkg})"
+                )
+            except ImportError as e:
+                # If import fails, try to find the package directory and add it to sys.path
+                print(f"[WARNING] Failed to pre-load target package {pkg_name}: {e}")
+                print(
+                    f"[INFO] Trying to find and add {target_pkg} directory to sys.path"
+                )
+
+                # Look for the package directory in current working directory and parent directories
+                current_dir = os.getcwd()
+                found = False
+
+                for _ in range(5):  # Limit search to 5 levels up
+                    # Try both hyphenated and underscore versions of the directory name
+                    for dir_name in [target_pkg, pkg_name]:
+                        pkg_dir = os.path.join(current_dir, dir_name)
+                        if os.path.isdir(pkg_dir):
+                            print(f"[INFO] Found package directory: {pkg_dir}")
+
+                            # Check if this directory has a pyproject.toml or setup.py file
+                            pyproject_toml = os.path.join(pkg_dir, "pyproject.toml")
+                            setup_py = os.path.join(pkg_dir, "setup.py")
+
+                            # Check if this directory has a src subdirectory
+                            src_in_pkg = os.path.join(pkg_dir, "src")
+                            if os.path.isdir(src_in_pkg):
+                                # If it does, add the src directory to sys.path
+                                if src_in_pkg not in sys.path:
+                                    sys.path.insert(0, src_in_pkg)
+                                    print(f"[INFO] Added {src_in_pkg} to sys.path")
+                                # Try to import again
+                                try:
+                                    importlib.import_module(pkg_name)
+                                    print(
+                                        f"[INFO] Pre-loaded target package: {pkg_name}"
+                                    )
+                                    found = True
+                                except ImportError as e2:
+                                    print(
+                                        f"[WARNING] Still failed to pre-load target package {pkg_name}: {e2}"
+                                    )
+                                break
+                            elif os.path.exists(pyproject_toml) or os.path.exists(
+                                setup_py
+                            ):
+                                # If it has pyproject.toml or setup.py, add the directory itself
+                                if pkg_dir not in sys.path:
+                                    sys.path.insert(0, pkg_dir)
+                                    print(f"[INFO] Added {pkg_dir} to sys.path")
+                                # Try to import again
+                                try:
+                                    importlib.import_module(pkg_name)
+                                    print(
+                                        f"[INFO] Pre-loaded target package: {pkg_name}"
+                                    )
+                                    found = True
+                                except ImportError as e2:
+                                    print(
+                                        f"[WARNING] Still failed to pre-load target package {pkg_name}: {e2}"
+                                    )
+                                break
+                            else:
+                                # Add the package directory itself to sys.path
+                                if pkg_dir not in sys.path:
+                                    sys.path.insert(0, pkg_dir)
+                                    print(f"[INFO] Added {pkg_dir} to sys.path")
+                                # Try to import again
+                                try:
+                                    importlib.import_module(pkg_name)
+                                    print(
+                                        f"[INFO] Pre-loaded target package: {pkg_name}"
+                                    )
+                                    found = True
+                                except ImportError as e2:
+                                    print(
+                                        f"[WARNING] Still failed to pre-load target package {pkg_name}: {e2}"
+                                    )
+                                break
+
+                    # Look for src directory which might contain the package
+                    if not found:
+                        src_dir = os.path.join(current_dir, "src")
+                        if os.path.isdir(src_dir):
+                            # Try both hyphenated and underscore versions of the package name in src
+                            for src_pkg_name in [target_pkg, pkg_name]:
+                                pkg_in_src = os.path.join(src_dir, src_pkg_name)
+                                if os.path.isdir(pkg_in_src):
+                                    if src_dir not in sys.path:
+                                        sys.path.insert(0, src_dir)
+                                        print(f"[INFO] Added {src_dir} to sys.path")
+                                    # Try to import again
+                                    try:
+                                        importlib.import_module(pkg_name)
+                                        print(
+                                            f"[INFO] Pre-loaded target package: {pkg_name}"
+                                        )
+                                        found = True
+                                    except ImportError as e2:
+                                        print(
+                                            f"[WARNING] Still failed to pre-load target package {pkg_name}: {e2}"
+                                        )
+                                    break
+
+                    if found:
+                        break
+
+                    # Move up one directory
+                    parent_dir = os.path.dirname(current_dir)
+                    if parent_dir == current_dir:  # Reached root directory
+                        break
+                    current_dir = parent_dir
+
+                if not found:
+                    print(
+                        f"[ERROR] Could not find package {target_pkg} in any directory. Consider setting SPRINTEST_TARGET_PKG_PATH."
+                    )
 
     uvicorn.run(app, host="0.0.0.0", port=port)
