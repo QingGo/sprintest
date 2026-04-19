@@ -148,3 +148,4 @@ cython_debug/
 
 # project
 docs/checklist.md
+docs/prd.md

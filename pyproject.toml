@@ -6,7 +6,13 @@ build-backend = "setuptools.build_meta"
 name = "sprintest"
 version = "0.1.0"
 description = "A C/S architecture test runner for heavy AI projects."
-dependencies = ["fastapi", "uvicorn", "requests", "pytest"]
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "requests",
+    "pytest",
+]
+requires-python = ">=3.10"
 
 [project.scripts]
 stest = "sprintest.cli:main"
@@ -16,3 +22,61 @@ sprintest-daemon = "sprintest.daemon:run"
 
 [tool.setuptools]
 packages = ["sprintest"]
+
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+exclude = ["\\.venv", "build", "dist"]
+
+[[tool.mypy.overrides]]
+module = [
+    "tqdm.*",
+    "sympy.*",
+    "tokenizers.*",
+    "datasets.*",
+    "matplotlib.*",
+    "seaborn.*",
+    "scipy.*",
+    "pandas.*",
+]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+# E: pycodestyle
+# F: Pyflakes
+# I: isort
+# B: flake8-bugbear
+# TCH: flake8-type-checking
+# PLC: pylint-convention
+# UP: pyupgrade
+select = ["E", "F", "I", "B", "TCH", "PLC", "UP"]
+# E501: Line too long
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# F811: Redefinition of unused name
+# F401: Module imported but unused
+# B011: Do not call assert False
+# PLC0415: import should be at the top-level (allowed for lazy loading in tests)
+"tests/*" = ["F811", "F401", "B011", "PLC0415"]
+
+[tool.pyright]
+include = ["sprintest"]
+exclude = ["tests"]
+reportMissingTypeStubs = false
+executionEnvironments = [
+  { root = "tests", reportArgumentType = "none" }
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.10.0",
+    "ruff>=0.15.11",
+]
