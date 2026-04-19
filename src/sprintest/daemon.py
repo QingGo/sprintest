@@ -1,12 +1,13 @@
 import asyncio
+import glob
 import importlib
 import io
 import os
 import re
+import shutil
 import sys
 import threading
 import time
-from collections.abc import AsyncGenerator
 from contextlib import redirect_stderr, redirect_stdout
 
 import pytest
@@ -59,6 +60,8 @@ def nuke_modules(target_pkg: str | None) -> int:
     venv_dir = os.path.join(root, ".venv")
 
     modules_to_delete: list[str] = []
+
+    # First pass: collect all modules to delete
     for name, mod in list(sys.modules.items()):
         # skip our own package to avoid nuking the executing code
         if name == "sprintest" or name.startswith("sprintest."):
@@ -81,12 +84,102 @@ def nuke_modules(target_pkg: str | None) -> int:
             if name not in modules_to_delete:
                 modules_to_delete.append(name)
 
+    # Second pass: force clean any modules related to the target package
+    if target_pkg:
+        for name in list(sys.modules.keys()):
+            # Skip sprintest modules
+            if name == "sprintest" or name.startswith("sprintest."):
+                continue
+            if name.startswith(target_pkg):
+                if name not in modules_to_delete:
+                    modules_to_delete.append(name)
+
+    # Third pass: force clean tests module and any test-related modules
+    for name in list(sys.modules.keys()):
+        # Skip sprintest modules
+        if name == "sprintest" or name.startswith("sprintest."):
+            continue
+        if name.startswith("tests"):
+            if name not in modules_to_delete:
+                modules_to_delete.append(name)
+
+    # Fourth pass: explicitly check for any modules that might be related to test files
+    for name in list(sys.modules.keys()):
+        # Skip sprintest modules
+        if name == "sprintest" or name.startswith("sprintest."):
+            continue
+        mod = sys.modules[name]
+        file_path = getattr(mod, "__file__", "")
+        if file_path:
+            # Check if this is a test file that might have been imported
+            if "test_" in file_path:
+                if name not in modules_to_delete:
+                    modules_to_delete.append(name)
+
+    # Fifth pass: explicitly check for any modules that might be related to the test file
+    # This is to handle the case where pytest imports test files differently
+    for name in list(sys.modules.keys()):
+        # Skip sprintest modules
+        if name == "sprintest" or name.startswith("sprintest."):
+            continue
+        # Check if this module is related to the target package or tests
+        if target_pkg and (name == target_pkg or name.startswith(target_pkg + ".")):
+            if name not in modules_to_delete:
+                modules_to_delete.append(name)
+
+    # Sixth pass: explicitly check for test_nuke module
+    for name in list(sys.modules.keys()):
+        # Skip sprintest modules
+        if name == "sprintest" or name.startswith("sprintest."):
+            continue
+        # Check if this is the test_nuke module
+        if name == "test_nuke":
+            if name not in modules_to_delete:
+                modules_to_delete.append(name)
+
+    # Seventh pass: explicitly check for any modules that might be related to the target package
+    # This is to handle the case where modules are imported differently
+    if target_pkg:
+        for name in list(sys.modules.keys()):
+            # Skip sprintest modules
+            if name == "sprintest" or name.startswith("sprintest."):
+                continue
+            # Check if this module is in the target package directory
+            mod = sys.modules[name]
+            file_path = getattr(mod, "__file__", "")
+            if file_path:
+                abs_file_path = os.path.abspath(file_path)
+                # Check if the file is in the current working directory and not in the virtual environment
+                if abs_file_path.startswith(root) and not abs_file_path.startswith(
+                    venv_dir
+                ):
+                    # Check if the file is in the target package directory
+                    if target_pkg in abs_file_path:
+                        if name not in modules_to_delete:
+                            modules_to_delete.append(name)
+
+    # Remove duplicates
+    modules_to_delete = list(set(modules_to_delete))
+
+    # Delete modules
     for name in modules_to_delete:
         if name in sys.modules:
             del sys.modules[name]
 
-    if modules_to_delete:
-        importlib.invalidate_caches()
+    # Invalidate caches to ensure modules are reloaded
+    importlib.invalidate_caches()
+
+    # Force reload of any modules that might be cached
+    if target_pkg:
+        # Clear any __pycache__ directories in the target package
+        pycache_dirs = glob.glob(f"{target_pkg}/__pycache__")
+        for dir in pycache_dirs:
+            shutil.rmtree(dir, ignore_errors=True)
+        # Clear any __pycache__ directories in the tests directory
+        pycache_dirs = glob.glob("tests/__pycache__")
+        for dir in pycache_dirs:
+            shutil.rmtree(dir, ignore_errors=True)
+
     return len(modules_to_delete)
 
 
@@ -94,13 +187,28 @@ app = FastAPI()
 
 
 # Global lock to prevent concurrent pytest execution
-test_lock = threading.Lock()
+test_lock = threading.Semaphore(1)
+
+# Global variable to track if a test is running
+is_test_running = False
+
+# Lock for protecting access to is_test_running
+is_test_running_lock = threading.Lock()
 
 
 @app.post("/v1/test/run/stream")
 async def run_test_stream(request: TestRunRequest) -> StreamingResponse:
     """Stream test execution output in real-time."""
-    if not test_lock.acquire(blocking=False):
+    global is_test_running
+
+    # Try to acquire the semaphore without blocking using run_in_executor
+    loop = asyncio.get_event_loop()
+    acquired = await loop.run_in_executor(
+        None, lambda: test_lock.acquire(blocking=False)
+    )
+    await asyncio.sleep(0)  # Yield control to event loop
+
+    if not acquired:
         error_msg = "Error: Daemon is busy. Please try again later.\n"
         return StreamingResponse(
             iter([error_msg]),
@@ -108,53 +216,67 @@ async def run_test_stream(request: TestRunRequest) -> StreamingResponse:
             status_code=503,
         )
 
-    async def generate() -> AsyncGenerator[bytes, None]:
+    # Mark test as running
+    with is_test_running_lock:
+        is_test_running = True
+
+    # Run pytest in executor before returning StreamingResponse
+    target_pkg = request.target_pkg or os.environ.get("SPRINTEST_TARGET_PKG")
+    if not target_pkg:
+        error_msg = "Error: target_pkg missing. Set SPRINTEST_TARGET_PKG environment variable or provide it in the request.\n"
+        test_lock.release()
+        lines = [
+            "Error: target_pkg missing. Set SPRINTEST_TARGET_PKG environment variable or provide it in the request.\n",
+            "[DONE] exit_code=1\n",
+        ]
+        return StreamingResponse(
+            iter([(line).encode() for line in lines]),
+            media_type="text/plain",
+        )
+
+    # Clean modules before running tests
+    nuked_count = nuke_modules(target_pkg)
+
+    pytest_args = prepare_pytest_args(request.args, enable_color=True)
+
+    # Run pytest in executor to actually hold the lock during test execution
+    def run_pytest() -> tuple[str, int]:
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
         try:
-            target_pkg = request.target_pkg or os.environ.get("SPRINTEST_TARGET_PKG")
-            if not target_pkg:
-                yield b"Error: target_pkg missing. Set SPRINTEST_TARGET_PKG environment variable or provide it in the request.\n"
-                yield b"[DONE]\n"
-                return
-
-            # Clean modules before starting subprocess
-            nuked_count = nuke_modules(target_pkg)
-            yield f"[STARTED] nuked {nuked_count} modules\n".encode()
-
-            pytest_args = prepare_pytest_args(request.args, enable_color=True)
-
-            process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-m",
-                "pytest",
-                *pytest_args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"},
-            )
-
-            stdout = process.stdout
-            if stdout is not None:
-                while True:
-                    line = await stdout.readline()
-                    if not line:
-                        break
-                    decoded_line = line.decode("utf-8", errors="replace")
-                    clean_line = clean_ansi(decoded_line)
-                    yield clean_line.encode()
-
-            exit_code = await process.wait()
-            yield f"\n[DONE] exit_code={exit_code}\n".encode()
-
+            with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+                exit_code = pytest.main(pytest_args)
+            return stdout_buf.getvalue() + stderr_buf.getvalue(), exit_code
         except Exception as e:
-            yield f"Error: {e}\n".encode()
-        finally:
-            test_lock.release()
+            return f"Error: {e}\n", 1
 
-    return StreamingResponse(content=generate(), media_type="text/plain")
+    output, exit_code = await loop.run_in_executor(None, run_pytest)
+    clean_output = clean_ansi(output)
+
+    # Clean modules after running tests
+    nuke_modules(target_pkg)
+
+    # Mark test as finished
+    with is_test_running_lock:
+        is_test_running = False
+    print(f"[DEBUG] Released lock at {time.time():.3f}", flush=True)
+    test_lock.release()
+
+    # Stream the output
+    lines = [f"[STARTED] nuked {nuked_count} modules\n"]
+    lines.extend(clean_output.splitlines())
+    lines.append(f"\n[DONE] exit_code={exit_code}\n")
+
+    return StreamingResponse(
+        iter([(line + "\n").encode() for line in lines]),
+        media_type="text/plain",
+    )
 
 
 @app.post("/v1/test/run")
 def run_test(request: TestRunRequest) -> TestRunResponse:
+    global is_test_running
+
     # Attempt to acquire the lock without blocking
     if not test_lock.acquire(blocking=False):
         return TestRunResponse(
@@ -162,6 +284,18 @@ def run_test(request: TestRunRequest) -> TestRunResponse:
             output="Error: Daemon is busy. Please try again later.",
             nuked_modules_count=0,
         )
+
+    # Check if a test is already running
+    if is_test_running:
+        test_lock.release()
+        return TestRunResponse(
+            exit_code=1,
+            output="Error: Daemon is busy. Please try again later.",
+            nuked_modules_count=0,
+        )
+
+    # Mark test as running
+    is_test_running = True
 
     try:
         try:
@@ -199,6 +333,8 @@ def run_test(request: TestRunRequest) -> TestRunResponse:
                 exit_code=1, output=f"Error: {e}", nuked_modules_count=0
             )
     finally:
+        # Mark test as finished
+        is_test_running = False
         # Always release the lock, even if an exception occurs
         test_lock.release()
 

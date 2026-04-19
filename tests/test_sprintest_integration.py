@@ -289,7 +289,7 @@ def test_stream_concurrency_lock(daemon_process: dict[str, Any]) -> None:
             text=True,
         )
 
-        time.sleep(1.5)
+        time.sleep(0.5)  # Send second request while first is still running
 
         res2 = subprocess.run(
             [
