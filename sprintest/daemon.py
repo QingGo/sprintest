@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 class TestRunRequest(BaseModel):
     args: list[str]
-    target_pkg: str
+    target_pkg: str | None = None
 
 
 class TestRunResponse(BaseModel):
@@ -23,24 +23,28 @@ class TestRunResponse(BaseModel):
     nuked_modules_count: int
 
 
-def nuke_modules(target_pkg: str) -> int:
+def nuke_modules(target_pkg: str | None) -> int:
     # Identify all modules that were loaded from the current working directory
     # but are not part of the virtual environment.
-    root = os.getcwd()
+    root = os.path.abspath(os.getcwd())
     venv_dir = os.path.join(root, ".venv")
 
     modules_to_delete = []
     for name, mod in list(sys.modules.items()):
+        # skip our own package to avoid nuking the executing code
+        if name == "sprintest" or name.startswith("sprintest."):
+            continue
+
         # 1. Path-based detection (most reliable for local code)
         file_path = getattr(mod, "__file__", "")
-        if (
-            file_path
-            and file_path.startswith(root)
-            and not file_path.startswith(venv_dir)
-        ):
-            modules_to_delete.append(name)
+        if file_path:
+            abs_file_path = os.path.abspath(file_path)
+            if abs_file_path.startswith(root) and not abs_file_path.startswith(venv_dir):
+                modules_to_delete.append(name)
+                continue
+
         # 2. Name-based fallback for the target package and tests
-        elif (
+        if (
             target_pkg and (name == target_pkg or name.startswith(target_pkg + "."))
         ) or (name == "tests" or name.startswith("tests.")):
             if name not in modules_to_delete:
@@ -74,7 +78,16 @@ def run_test(request: TestRunRequest) -> TestRunResponse:
 
     try:
         try:
-            nuked_count = nuke_modules(request.target_pkg)
+            # Priority: Request > SPRINTEST_TARGET_PKG
+            target_pkg = request.target_pkg or os.environ.get("SPRINTEST_TARGET_PKG")
+            if not target_pkg:
+                return TestRunResponse(
+                    exit_code=1,
+                    output="Error: target_pkg missing. Set SPRINTEST_TARGET_PKG environment variable or provide it in the request.",
+                    nuked_modules_count=0,
+                )
+
+            nuked_count = nuke_modules(target_pkg)
 
             # 1. Process pytest arguments
             pytest_args = request.args.copy()
@@ -120,7 +133,8 @@ def run_test(request: TestRunRequest) -> TestRunResponse:
 
 
 def run():
-    port = int(os.environ.get("STEST_PORT", "8000"))
+    port_str = os.environ.get("SPRINTEST_PORT", "8000")
+    port = int(port_str)
     if os.getcwd() not in sys.path:
         sys.path.insert(0, os.getcwd())
     uvicorn.run(app, host="0.0.0.0", port=port)

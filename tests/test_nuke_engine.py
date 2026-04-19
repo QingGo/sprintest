@@ -35,7 +35,7 @@ def test_nuke_engine_hot_reload():
     # Start the daemon on a specific port for testing
     port = 8001
     env = os.environ.copy()
-    env["STEST_PORT"] = str(port)
+    env["SPRINTEST_PORT"] = str(port)
     # Use python to run the daemon entry point
     daemon_proc = subprocess.Popen(
         [".venv/bin/python", "-c", "from sprintest.daemon import run; run()"],
@@ -61,8 +61,10 @@ def test_nuke_engine_hot_reload():
             ],
             env=env,
             cwd=project_root,
+            capture_output=True,
+            text=True
         )
-        assert res.returncode == 0, "Initial run should pass"
+        assert res.returncode == 0, f"Initial run should pass. Output: {res.stdout}\nError: {res.stderr}"
 
         # Step 2: VERSION = 2, Test assert 1 -> Should Fail with assert 2 == 1
         set_version(2)
@@ -77,8 +79,10 @@ def test_nuke_engine_hot_reload():
             ],
             env=env,
             cwd=project_root,
+            capture_output=True,
+            text=True
         )
-        assert res.returncode != 0, "Run after change to 2 should fail"
+        assert res.returncode != 0, f"Run after change to 2 should fail. Output: {res.stdout}"
 
         # Step 3: VERSION = 1, Test assert 1 -> Should Pass again (The Revert Scenario)
         set_version(1)
@@ -93,9 +97,11 @@ def test_nuke_engine_hot_reload():
             ],
             env=env,
             cwd=project_root,
+            capture_output=True,
+            text=True
         )
         assert res.returncode == 0, (
-            "Run after revert to 1 should pass. Hot-reload failed if this didn't pass!"
+            f"Run after revert to 1 should pass. Output: {res.stdout}\nError: {res.stderr}"
         )
 
     finally:
