@@ -46,21 +46,45 @@ def nuke_modules(target_pkg: str) -> int:
 
 app = FastAPI()
 
+import re
+import warnings
+
 @app.post("/v1/test/run")
 async def run_test(request: TestRunRequest) -> TestRunResponse:
     nuked_count = nuke_modules(request.target_pkg)
+    
+    # 1. Process pytest arguments
+    pytest_args = request.args.copy()
+    
+    # Force --color=no
+    color_found = False
+    for i, arg in enumerate(pytest_args):
+        if arg.startswith("--color="):
+            pytest_args[i] = "--color=no"
+            color_found = True
+            break
+    if not color_found:
+        pytest_args.append("--color=no")
+        
+    # Suppress the anyio assert rewrite warning
+    pytest_args.extend(["-W", "ignore::pytest.PytestAssertRewriteWarning"])
     
     stdout_buf = io.StringIO()
     stderr_buf = io.StringIO()
     
     with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
-        exit_code = pytest.main(request.args)
+        exit_code = pytest.main(pytest_args)
     
-    output = stdout_buf.getvalue() + stderr_buf.getvalue()
+    # 2. Extract and purify output
+    raw_output = stdout_buf.getvalue() + stderr_buf.getvalue()
+    
+    # Final safety net: Strip ANSI escape codes using regex
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*[mK]')
+    clean_output = ansi_escape.sub('', raw_output)
     
     return TestRunResponse(
         exit_code=exit_code,
-        output=output,
+        output=clean_output,
         nuked_modules_count=nuked_count
     )
 
