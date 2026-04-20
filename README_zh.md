@@ -23,25 +23,26 @@ pip install sprintest
 
 ## 快速开始
 
-1. **启动服务端**：
-   在项目根目录下运行：
-   ```bash
-   sprintest-daemon
-   ```
-
-2. **运行测试**：
-   在另一个终端运行：
+1. **运行测试**：
+   在项目根目录下直接运行：
    ```bash
    sprintest tests/your_test_file.py
    ```
+   
+   系统会自动检测并启动 Sprintest Daemon（如果尚未运行）。
+
+2. **手动管理 Daemon**（可选）：
+   - 查看状态：`sprintest status`
+   - 停止 Daemon：`sprintest stop`
+   - 手动启动：`sprintest-daemon`
 
 ## 配置项
 
 您可以通过环境变量自定义 Sprintest：
 
-- `SPRINTEST_PORT`：设置服务端和客户端通信的端口（默认：`8000`）。
 - `SPRINTEST_TARGET_PKG`：设置需要热重载的包名（例如您的项目主包名）。这可以确保您的源码变动被正确检测。
 - `SPRINTEST_TARGET_PKG_PATH`：设置目标包的具体路径（可选）。当自动搜索无法找到包时，可以使用此选项直接指定路径。
+- `SPRINTEST_PORT`：当 Unix socket 不可用时的 TCP 端口（默认：`8000`）。
 
 示例：
 ```bash

@@ -987,6 +987,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "pytest" },
     { name = "requests" },
+    { name = "tomli" },
     { name = "uvicorn" },
 ]
 
@@ -1004,6 +1005,7 @@ requires-dist = [
     { name = "fastapi" },
     { name = "pytest" },
     { name = "requests" },
+    { name = "tomli", specifier = ">=2.4.1" },
     { name = "uvicorn" },
 ]
 

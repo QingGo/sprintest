@@ -1,6 +1,18 @@
 import os
+import socket
 import subprocess
+import sys
 import time
+from contextlib import closing
+
+import pytest
+
+
+def find_free_port() -> int:
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        s.bind(("", 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return int(s.getsockname()[1])
 
 
 def test_nuke_engine_hot_reload() -> None:
@@ -30,15 +42,29 @@ def test_nuke_engine_hot_reload() -> None:
             f.write(f"def test_v(): assert VERSION == {v}\n")
 
     # Start the daemon on a specific port for testing
-    port = 8001
+    port = find_free_port()
     env = os.environ.copy()
     env["SPRINTEST_PORT"] = str(port)
     env["PYTHONPATH"] = os.path.join(project_root, "src")
-    # Use python to run the daemon entry point
+
+    # Use -m uvicorn to ensure it starts correctly, similar to integration tests
     daemon_proc = subprocess.Popen(
-        [".venv/bin/python", "-c", "from sprintest.daemon import run; run()"],
+        [
+            sys.executable,
+            "-u",
+            "-m",
+            "uvicorn",
+            "sprintest.daemon:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(port),
+        ],
         env=env,
         cwd=project_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
 
     # Set target_pkg in env for the CLI runs below
@@ -46,14 +72,32 @@ def test_nuke_engine_hot_reload() -> None:
 
     try:
         # Wait for daemon to start
-        time.sleep(3)
+        max_retries = 30
+        daemon_ready = False
+        for _ in range(max_retries):
+            try:
+                import requests
+
+                requests.get(f"http://localhost:{port}/v1/status", timeout=0.5)
+                daemon_ready = True
+                break
+            except Exception:
+                time.sleep(0.3)
+
+        if not daemon_ready:
+            daemon_proc.terminate()
+            stdout, stderr = daemon_proc.communicate(timeout=2)
+            print(f"Daemon failed to start. STDOUT: {stdout}\nSTDERR: {stderr}")
+            pytest.fail(
+                f"Daemon failed to start in test_nuke_engine_hot_reload. Port: {port}"
+            )
 
         # Step 1: VERSION = 1, Test assert 1 -> Should Pass
         set_version(1)
         set_test(1)
         res = subprocess.run(
             [
-                ".venv/bin/python",
+                sys.executable,
                 "-c",
                 "from sprintest.cli import main; main()",
                 test_file,

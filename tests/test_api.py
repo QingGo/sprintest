@@ -1,5 +1,6 @@
-from unittest.mock import patch
+from unittest.mock import call, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from sprintest.daemon import app, test_lock
@@ -82,51 +83,57 @@ def test_api_run_test_missing_pkg() -> None:
 
 def test_pre_load_logic() -> None:
     """Test the pre-load logic in run() function"""
-    import os
-    import sys
+    import importlib
     from unittest.mock import patch
 
     # Test with SPRINTEST_TARGET_PKG set
     with (
         patch.dict(
             "os.environ",
-            {"SPRINTEST_TARGET_PKG": "sprintest", "SPRINTEST_PORT": "8000"},
+            {
+                "SPRINTEST_TARGET_PKG": "sprintest",
+                "SPRINTEST_PORT": "8000",
+                "SPRINTEST_FORCE_TCP": "1",
+                "SPRINTEST_SKIP_UVICORN": "1",
+            },
         ),
         patch("importlib.import_module") as mock_import,
     ):
-        # Import run
         from sprintest.daemon import run
 
-        # Run the function and catch SystemExit
-        try:
-            run()
-        except SystemExit:
-            pass
+        # Run the function
+        run()
+
         # Verify importlib.import_module was called with the target package
         sprintest_calls = [
-            call for call in mock_import.call_args_list if call[0][0] == "sprintest"
+            c
+            for c in mock_import.call_args_list
+            if len(c[0]) > 0 and c[0][0] == "sprintest"
         ]
         assert len(sprintest_calls) > 0
 
-    # Clear the module cache to reload
-    if "sprintest.daemon" in sys.modules:
-        del sys.modules["sprintest.daemon"]
-
     # Test with SPRINTEST_TARGET_PKG not set
     with (
-        patch.dict("os.environ", {"SPRINTEST_PORT": "8000"}, clear=True),
+        patch.dict(
+            "os.environ",
+            {
+                "SPRINTEST_PORT": "8000",
+                "SPRINTEST_FORCE_TCP": "1",
+                "SPRINTEST_SKIP_UVICORN": "1",
+            },
+            clear=True,
+        ),
         patch("importlib.import_module") as mock_import,
     ):
-        # Import run again
         from sprintest.daemon import run
 
-        # Run the function and catch SystemExit
-        try:
-            run()
-        except SystemExit:
-            pass
+        # Run the function
+        run()
+
         # Verify importlib.import_module was not called with the target package
         sprintest_calls = [
-            call for call in mock_import.call_args_list if call[0][0] == "sprintest"
+            c
+            for c in mock_import.call_args_list
+            if len(c[0]) > 0 and c[0][0] == "sprintest"
         ]
         assert len(sprintest_calls) == 0

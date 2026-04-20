@@ -2,21 +2,32 @@ import asyncio
 import glob
 import importlib
 import io
+import json
 import os
 import re
 import shutil
+import socket
 import sys
+import tempfile
 import threading
 import time
 from contextlib import redirect_stderr, redirect_stdout
 
+import psutil
 import pytest
 import uvicorn  # type: ignore
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from sprintest import __version__
+from sprintest.status import (
+    ensure_sprintest_dir,
+    get_socket_path,
+    remove_socket,
+    remove_status,
+    write_status,
+)
 
 
 class TestRunRequest(BaseModel):
@@ -186,111 +197,131 @@ def nuke_modules(target_pkg: str | None) -> int:
 app = FastAPI()
 
 
-# Global lock to prevent concurrent pytest execution
-test_lock = threading.Semaphore(1)
-
-# Global variable to track if a test is running
-is_test_running = False
-
-# Lock for protecting access to is_test_running
-is_test_running_lock = threading.Lock()
-
-# Flag to track if this is the first test run (to preserve pre-loaded modules)
+# Global variables to track state
+# test_lock is used to ensure only one test run happens at a time
+test_lock = threading.Lock()
 first_test_run = True
-
-# Lock for protecting access to first_test_run
 first_test_run_lock = threading.Lock()
+
+
+def get_lock_path() -> str:
+    return os.path.join(tempfile.gettempdir(), f"sprintest_{os.getpid()}.lock")
+
+
+# For simplicity in integration tests where we might have one daemon but multiple CLI calls
+# we use a fixed lock file based on the port if possible, or just a global one.
+DAEMON_LOCK_FILE = os.path.join(tempfile.gettempdir(), "sprintest_global.lock")
+
+
+def acquire_daemon_lock() -> bool:
+    if os.path.exists(DAEMON_LOCK_FILE):
+        # Check if the process is still alive
+        try:
+            with open(DAEMON_LOCK_FILE) as f:
+                pid = int(f.read().strip())
+            if psutil.pid_exists(pid):
+                return False
+        except Exception:
+            pass
+    try:
+        with open(DAEMON_LOCK_FILE, "w") as f:
+            f.write(str(os.getpid()))
+        return True
+    except Exception:
+        return False
+
+
+def release_daemon_lock() -> None:
+    try:
+        if os.path.exists(DAEMON_LOCK_FILE):
+            os.remove(DAEMON_LOCK_FILE)
+    except Exception:
+        pass
 
 
 @app.post("/v1/test/run/stream")
 async def run_test_stream(request: TestRunRequest) -> StreamingResponse:
     """Stream test execution output in real-time."""
-    global is_test_running
-
-    # Try to acquire the semaphore without blocking using run_in_executor
-    loop = asyncio.get_event_loop()
-    acquired = await loop.run_in_executor(
-        None, lambda: test_lock.acquire(blocking=False)
-    )
-    await asyncio.sleep(0)  # Yield control to event loop
-
-    if not acquired:
-        error_msg = "Error: Daemon is busy. Please try again later.\n"
-        return StreamingResponse(
-            iter([error_msg]),
-            media_type="text/plain",
-            status_code=503,
+    if not test_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=503, detail="Daemon is busy. Please try again later."
         )
 
-    # Mark test as running
-    with is_test_running_lock:
-        is_test_running = True
+    try:
+        loop = asyncio.get_event_loop()
 
-    # Run pytest in executor before returning StreamingResponse
-    target_pkg = request.target_pkg or os.environ.get("SPRINTEST_TARGET_PKG")
-    if not target_pkg:
-        error_msg = "Error: target_pkg missing. Set SPRINTEST_TARGET_PKG environment variable or provide it in the request.\n"
-        test_lock.release()
-        lines = [
-            "Error: target_pkg missing. Set SPRINTEST_TARGET_PKG environment variable or provide it in the request.\n",
-            "[DONE] exit_code=1\n",
-        ]
-        return StreamingResponse(
-            iter([(line).encode() for line in lines]),
-            media_type="text/plain",
-        )
-
-    # Clean modules before running tests, but skip on first run to preserve pre-loaded modules
-    global first_test_run
-    with first_test_run_lock:
-        if first_test_run:
-            nuked_count = 0
-            print(
-                "[INFO] Skipping module cleanup on first run to preserve pre-loaded modules"
+        # Run pytest in executor before returning StreamingResponse
+        target_pkg = request.target_pkg or os.environ.get("SPRINTEST_TARGET_PKG")
+        if not target_pkg:
+            error_msg = "Error: target_pkg missing. Set SPRINTEST_TARGET_PKG environment variable or provide it in the request.\n"
+            lines = [
+                error_msg,
+                "[DONE] exit_code=1\n",
+            ]
+            return StreamingResponse(
+                iter([(line).encode() for line in lines]),
+                media_type="text/plain",
             )
-            first_test_run = False
-        else:
-            nuked_count = nuke_modules(target_pkg)
 
-    pytest_args = prepare_pytest_args(request.args, enable_color=True)
+        # Clean modules before running tests, but skip on first run to preserve pre-loaded modules
+        global first_test_run
+        with first_test_run_lock:
+            if first_test_run:
+                nuked_count = 0
+                first_test_run = False
+            else:
+                nuked_count = nuke_modules(target_pkg)
 
-    # Run pytest in executor to actually hold the lock during test execution
-    def run_pytest() -> tuple[str, int]:
-        stdout_buf = io.StringIO()
-        stderr_buf = io.StringIO()
+        pytest_args = prepare_pytest_args(request.args, enable_color=True)
+
+        # Run pytest in executor to actually hold the lock during test execution
+        def run_pytest() -> tuple[str, int]:
+            stdout_buf = io.StringIO()
+            stderr_buf = io.StringIO()
+            try:
+                with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+                    exit_code = pytest.main(pytest_args)
+                return stdout_buf.getvalue() + stderr_buf.getvalue(), exit_code
+            except Exception as e:
+                return f"Error: {e}\n", 1
+
+        output, exit_code = await loop.run_in_executor(None, run_pytest)
+        clean_output = clean_ansi(output)
+
+        # Clean modules after running tests
+        nuke_modules(target_pkg)
+
+        # Stream the output
+        lines = [f"[STARTED] nuked {nuked_count} modules\n"]
+        lines.extend(clean_output.splitlines())
+        lines.append(f"\n[DONE] exit_code={exit_code}\n")
+
+        return StreamingResponse(
+            iter([(line + "\n").encode() for line in lines]),
+            media_type="text/plain",
+        )
+    except HTTPException:
+        # Re-raise HTTPException as it's already handled by FastAPI
+        raise
+    except Exception as e:
+        error_msg = f"Error in run_test_stream: {e}\n"
+        return StreamingResponse(
+            iter([error_msg.encode()]),
+            media_type="text/plain",
+            status_code=500,
+        )
+    finally:
+        # Release the lock if we own it
         try:
-            with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
-                exit_code = pytest.main(pytest_args)
-            return stdout_buf.getvalue() + stderr_buf.getvalue(), exit_code
-        except Exception as e:
-            return f"Error: {e}\n", 1
-
-    output, exit_code = await loop.run_in_executor(None, run_pytest)
-    clean_output = clean_ansi(output)
-
-    # Clean modules after running tests
-    nuke_modules(target_pkg)
-
-    # Mark test as finished
-    with is_test_running_lock:
-        is_test_running = False
-    print(f"[DEBUG] Released lock at {time.time():.3f}", flush=True)
-    test_lock.release()
-
-    # Stream the output
-    lines = [f"[STARTED] nuked {nuked_count} modules\n"]
-    lines.extend(clean_output.splitlines())
-    lines.append(f"\n[DONE] exit_code={exit_code}\n")
-
-    return StreamingResponse(
-        iter([(line + "\n").encode() for line in lines]),
-        media_type="text/plain",
-    )
+            test_lock.release()
+        except RuntimeError:
+            # Lock might not be owned by this thread if it was already released
+            pass
 
 
 @app.post("/v1/test/run")
-def run_test(request: TestRunRequest) -> TestRunResponse:
-    global is_test_running
+async def run_test(request: TestRunRequest) -> TestRunResponse:
+    global first_test_run
 
     # Attempt to acquire the lock without blocking
     if not test_lock.acquire(blocking=False):
@@ -300,68 +331,57 @@ def run_test(request: TestRunRequest) -> TestRunResponse:
             nuked_modules_count=0,
         )
 
-    # Check if a test is already running
-    if is_test_running:
-        test_lock.release()
-        return TestRunResponse(
-            exit_code=1,
-            output="Error: Daemon is busy. Please try again later.",
-            nuked_modules_count=0,
-        )
-
-    # Mark test as running
-    is_test_running = True
-
     try:
-        try:
-            # Priority: Request > SPRINTEST_TARGET_PKG
-            target_pkg = request.target_pkg or os.environ.get("SPRINTEST_TARGET_PKG")
-            if not target_pkg:
-                return TestRunResponse(
-                    exit_code=1,
-                    output="Error: target_pkg missing. Set SPRINTEST_TARGET_PKG environment variable or provide it in the request.",
-                    nuked_modules_count=0,
+        # Priority: Request > SPRINTEST_TARGET_PKG
+        target_pkg = request.target_pkg or os.environ.get("SPRINTEST_TARGET_PKG")
+        if not target_pkg:
+            return TestRunResponse(
+                exit_code=1,
+                output="Error: target_pkg missing. Set SPRINTEST_TARGET_PKG environment variable or provide it in the request.",
+                nuked_modules_count=0,
+            )
+
+        # Clean modules before running tests, but skip on first run to preserve pre-loaded modules
+        with first_test_run_lock:
+            if first_test_run:
+                nuked_count = 0
+                print(
+                    "[INFO] Skipping module cleanup on first run to preserve pre-loaded modules"
                 )
+                first_test_run = False
+            else:
+                nuked_count = nuke_modules(target_pkg)
 
-            # Clean modules before running tests, but skip on first run to preserve pre-loaded modules
-            global first_test_run
-            with first_test_run_lock:
-                if first_test_run:
-                    nuked_count = 0
-                    print(
-                        "[INFO] Skipping module cleanup on first run to preserve pre-loaded modules"
-                    )
-                    first_test_run = False
-                else:
-                    nuked_count = nuke_modules(target_pkg)
+        # 1. Process pytest arguments
+        pytest_args = prepare_pytest_args(request.args)
 
-            # 1. Process pytest arguments
-            pytest_args = prepare_pytest_args(request.args)
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
 
-            stdout_buf = io.StringIO()
-            stderr_buf = io.StringIO()
-
+        def execute_pytest() -> int:
             with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
-                exit_code = pytest.main(pytest_args)
+                return pytest.main(pytest_args)
 
-            # 2. Extract and purify output
-            raw_output = stdout_buf.getvalue() + stderr_buf.getvalue()
-            clean_output = clean_ansi(raw_output)
+        loop = asyncio.get_event_loop()
+        exit_code = await loop.run_in_executor(None, execute_pytest)
 
-            return TestRunResponse(
-                exit_code=exit_code,
-                output=clean_output,
-                nuked_modules_count=nuked_count,
-            )
-        except Exception as e:
-            return TestRunResponse(
-                exit_code=1, output=f"Error: {e}", nuked_modules_count=0
-            )
+        # 2. Extract and purify output
+        raw_output = stdout_buf.getvalue() + stderr_buf.getvalue()
+        clean_output = clean_ansi(raw_output)
+
+        return TestRunResponse(
+            exit_code=exit_code,
+            output=clean_output,
+            nuked_modules_count=nuked_count,
+        )
+    except Exception as e:
+        return TestRunResponse(exit_code=1, output=f"Error: {e}", nuked_modules_count=0)
     finally:
         # Mark test as finished
-        is_test_running = False
-        # Always release the lock, even if an exception occurs
-        test_lock.release()
+        try:
+            test_lock.release()
+        except RuntimeError:
+            pass
 
 
 @app.get("/v1/status")
@@ -381,8 +401,6 @@ def stop() -> dict[str, str]:
 
 
 def run() -> None:
-    port_str = os.environ.get("SPRINTEST_PORT", "8000")
-    port = int(port_str)
     if os.getcwd() not in sys.path:
         sys.path.insert(0, os.getcwd())
 
@@ -532,4 +550,160 @@ def run() -> None:
                         f"[ERROR] Could not find package {target_pkg} in any directory. Consider setting SPRINTEST_TARGET_PKG_PATH."
                     )
 
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # Try to use Unix socket first
+    use_unix = (
+        hasattr(socket, "AF_UNIX") and os.environ.get("SPRINTEST_FORCE_TCP") != "1"
+    )
+
+    if use_unix:
+        try:
+            ensure_sprintest_dir()
+            socket_path = get_socket_path()
+            remove_socket()
+
+            # Create Unix socket server
+            server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server_socket.bind(socket_path)
+            server_socket.listen(1)
+
+            # Write status file
+            status = {
+                "pid": os.getpid(),
+                "socket_path": socket_path,
+                "version": __version__,
+                "type": "unix",
+            }
+            write_status(status)
+
+            print(f"[INFO] Sprintest Daemon started with Unix socket: {socket_path}")
+
+            # Handle socket connections
+            while True:
+                client_socket, client_address = server_socket.accept()
+                try:
+                    # Receive data from client
+                    data = b""
+                    while True:
+                        chunk = client_socket.recv(4096)
+                        if not chunk:
+                            break
+                        data += chunk
+                        if b"\n\n" in data:
+                            break
+
+                    if not data:
+                        continue
+
+                    # Parse JSON request
+                    try:
+                        request_data = json.loads(data.decode("utf-8"))
+                        command = request_data.get("command")
+
+                        if command == "run_test":
+                            # Handle test run request
+                            args = request_data.get("args", [])
+                            target_pkg = request_data.get(
+                                "target_pkg"
+                            ) or os.environ.get("SPRINTEST_TARGET_PKG")
+
+                            if not target_pkg:
+                                response = {
+                                    "exit_code": 1,
+                                    "output": "Error: target_pkg missing. Set SPRINTEST_TARGET_PKG environment variable or provide it in the request.",
+                                    "nuked_modules_count": 0,
+                                }
+                            else:
+                                # Clean modules before running tests, but skip on first run
+                                global first_test_run
+                                with first_test_run_lock:
+                                    if first_test_run:
+                                        nuked_count = 0
+                                        print(
+                                            "[INFO] Skipping module cleanup on first run to preserve pre-loaded modules"
+                                        )
+                                        first_test_run = False
+                                    else:
+                                        nuked_count = nuke_modules(target_pkg)
+
+                                # Run pytest
+                                pytest_args = prepare_pytest_args(args)
+                                stdout_buf = io.StringIO()
+                                stderr_buf = io.StringIO()
+
+                                try:
+                                    with (
+                                        redirect_stdout(stdout_buf),
+                                        redirect_stderr(stderr_buf),
+                                    ):
+                                        exit_code = pytest.main(pytest_args)
+                                    raw_output = (
+                                        stdout_buf.getvalue() + stderr_buf.getvalue()
+                                    )
+                                    clean_output = clean_ansi(raw_output)
+
+                                    # Clean modules after running tests
+                                    nuke_modules(target_pkg)
+
+                                    response = {
+                                        "exit_code": exit_code,
+                                        "output": clean_output,
+                                        "nuked_modules_count": nuked_count,
+                                    }
+                                except Exception as e:
+                                    response = {
+                                        "exit_code": 1,
+                                        "output": f"Error: {e}",
+                                        "nuked_modules_count": 0,
+                                    }
+                        elif command == "status":
+                            response = {"status": "running", "version": __version__}
+                        elif command == "stop":
+                            response = {
+                                "message": "Sprintest Daemon is shutting down..."
+                            }
+
+                            # Schedule shutdown
+                            def shutdown() -> None:
+                                time.sleep(0.5)
+                                remove_socket()
+                                remove_status()
+                                os._exit(0)
+
+                            threading.Thread(target=shutdown, daemon=True).start()
+                        else:
+                            response = {"error": "Unknown command"}
+                    except json.JSONDecodeError:
+                        response = {"error": "Invalid JSON request"}
+
+                    # Send response
+                    response_data = json.dumps(response).encode("utf-8") + b"\n\n"
+                    client_socket.sendall(response_data)
+                except Exception as e:
+                    print(f"[ERROR] Socket handling error: {e}")
+                finally:
+                    client_socket.close()
+        except (AttributeError, OSError) as e:
+            print(
+                f"[INFO] Unix socket not available or failed: {e}, falling back to TCP"
+            )
+
+    # TCP Fallback
+    port_str = os.environ.get("SPRINTEST_PORT", "8000")
+    port = int(port_str)
+
+    # Write status file for TCP mode
+    status = {
+        "pid": os.getpid(),
+        "port": port,
+        "version": __version__,
+        "type": "tcp",
+    }
+    write_status(status)
+
+    print(f"[INFO] Sprintest Daemon started with TCP port: {port}")
+    if os.environ.get("SPRINTEST_SKIP_UVICORN") != "1":
+        uvicorn.run(app, host="0.0.0.0", port=port)
+
+
+if __name__ == "__main__":
+    run()

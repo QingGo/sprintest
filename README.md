@@ -21,25 +21,25 @@ pip install sprintest
 
 ## Quick Start
 
-1. **Start the Daemon**:
-   In your project root, run:
-   ```bash
-   sprintest-daemon
-   ```
-
-2. **Run Tests**:
-   In another terminal, run:
+1. **Run Tests**:
+   In your project root, simply run:
    ```bash
    sprintest tests/your_test_file.py
    ```
+   
+   The system will automatically detect and start the Sprintest Daemon if it's not already running.
+
+2. **Manual Daemon Management** (optional):
+   - Check status: `sprintest status`
+   - Stop daemon: `sprintest stop`
+   - Start manually: `sprintest-daemon`
 
 ## Configuration
 
 You can customize Sprintest using environment variables:
-
-- `SPRINTEST_PORT`: Set the port for the daemon and CLI communication (default: `8000`).
 - `SPRINTEST_TARGET_PKG`: Set the name of the package to be hot-reloaded (e.g., your project's main package name). This ensures changes in your source code are detected.
 - `SPRINTEST_TARGET_PKG_PATH`: Set the specific path to the target package (optional). Use this option to directly specify the path when automatic search cannot find the package.
+- `SPRINTEST_PORT`: TCP port used when Unix socket is not available (default: `8000`).
 
 Example:
 ```bash
