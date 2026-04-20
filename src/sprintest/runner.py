@@ -34,7 +34,13 @@ class NukeStrategy:
 
     def _load_ignore_patterns(self) -> list[str]:
         """Load ignore patterns from pyproject.toml."""
-        patterns = ["sprintest", "sprintest.*"]  # Default ignores
+        patterns = [
+            "sprintest",
+            "sprintest.*",
+            "__main__",
+            "sys",
+            "builtins",
+        ]  # Default ignores
         path = os.path.join(self.root, "pyproject.toml")
         if os.path.exists(path):
             try:

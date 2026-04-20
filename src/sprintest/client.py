@@ -39,6 +39,15 @@ class DaemonClient:
     def __init__(self, port: str = "8000"):
         self.default_port = port
 
+    def _check_health(self) -> bool:
+        """Check if the daemon is responding to health checks."""
+        try:
+            with self._get_client() as client:
+                resp = client.get("/v1/status", timeout=0.1)
+                return resp.status_code == 200
+        except Exception:
+            return False
+
     def start_daemon(self) -> bool:
         """Start the daemon process if not running."""
         status = read_status()
@@ -55,18 +64,34 @@ class DaemonClient:
 
         for _ in range(constants.DAEMON_START_RETRIES):
             time.sleep(constants.DAEMON_START_WAIT)
-            status = read_status()
-            if status:
-                logger.info("Daemon started successfully!")
-                return True
+            if read_status():
+                if self._check_health():
+                    logger.info("Daemon started successfully!")
+                    return True
+
+        logger.error("Daemon failed to start or respond within timeout.")
         return False
+
+    def _create_client(self, status: dict[str, Any]) -> httpx.Client:
+        """Create an httpx.Client from status data."""
+        if status.get("type") == "unix":
+            transport = httpx.HTTPTransport(uds=status["socket_path"])
+            return httpx.Client(
+                transport=transport,
+                base_url="http://127.0.0.1",
+                timeout=None,
+                trust_env=False,
+            )
+        else:
+            port = status.get("port", self.default_port)
+            return httpx.Client(
+                base_url=f"http://127.0.0.1:{port}", timeout=None, trust_env=False
+            )
 
     @contextmanager
     def _get_client(self) -> Generator[httpx.Client, None, None]:
         """Create an httpx.Client configured for the current daemon state."""
-        status = read_status()
-
-        # Priority 1: Environment variable port
+        # 1. Environment variable port override
         env_port = os.environ.get(constants.ENV_PORT)
         if env_port:
             with httpx.Client(
@@ -75,51 +100,37 @@ class DaemonClient:
                 yield client
                 return
 
-        # Priority 2: Status file (Unix or TCP)
+        # 2. Try existing status
+        status = read_status()
         if status:
-            if status.get("type") == "unix":
-                transport = httpx.HTTPTransport(uds=status["socket_path"])
-                with httpx.Client(
-                    transport=transport,
-                    base_url="http://127.0.0.1",
-                    timeout=None,
-                    trust_env=False,
-                ) as client:
-                    yield client
-                    return
-            else:
-                port = status.get("port", self.default_port)
-                with httpx.Client(
-                    base_url=f"http://127.0.0.1:{port}", timeout=None, trust_env=False
-                ) as client:
-                    yield client
-                    return
+            daemon_type = status.get("type", "unknown")
+            daemon_id = status.get("pid", "unknown")
+            logger.debug(f"Found existing {daemon_type} daemon (PID: {daemon_id})")
 
-        # Priority 3: Start daemon if missing
+            client = self._create_client(status)
+            try:
+                # Quick health check
+                resp = client.get("/v1/status", timeout=0.2)
+                if resp.status_code == 200:
+                    with client:
+                        yield client
+                        return
+            except Exception as e:
+                logger.debug(f"Existing daemon is not responsive: {e}")
+            client.close()
+        else:
+            logger.debug("No active daemon status found.")
+
+        # 3. Start daemon if missing or dead
         if self.start_daemon():
             status = read_status()
             if status:
-                if status.get("type") == "unix":
-                    transport = httpx.HTTPTransport(uds=status["socket_path"])
-                    with httpx.Client(
-                        transport=transport,
-                        base_url="http://127.0.0.1",
-                        timeout=None,
-                        trust_env=False,
-                    ) as client:
-                        yield client
-                        return
-                else:
-                    port = status.get("port", self.default_port)
-                    with httpx.Client(
-                        base_url=f"http://127.0.0.1:{port}",
-                        timeout=None,
-                        trust_env=False,
-                    ) as client:
-                        yield client
-                        return
+                with self._create_client(status) as client:
+                    yield client
+                    return
 
-        # Final fallback
+        # 4. Final fallback
+        logger.debug(f"Using final fallback to TCP port {self.default_port}")
         with httpx.Client(
             base_url=f"http://127.0.0.1:{self.default_port}",
             timeout=None,
@@ -146,6 +157,7 @@ class DaemonClient:
 
     def stream_test_run(self, payload: dict[str, Any]) -> Any:
         """Stream test results from the daemon."""
+        self.start_daemon()
         status = read_status()
         if status and status.get("type") == "unix":
             transport = httpx.HTTPTransport(uds=status["socket_path"])

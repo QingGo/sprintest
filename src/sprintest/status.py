@@ -2,6 +2,8 @@ import json
 import os
 from typing import Any
 
+import psutil
+
 from sprintest import constants
 
 
@@ -43,14 +45,23 @@ def write_status(status: dict[str, Any]) -> None:
 
 
 def read_status() -> dict[str, Any] | None:
-    """读取状态文件"""
+    """读取状态文件，并验证进程是否存活"""
     path = get_status_path()
     if not os.path.exists(path):
         return None
     try:
         with open(path) as f:
             data = json.load(f)
-            return data if isinstance(data, dict) else None
+            if not isinstance(data, dict):
+                return None
+
+            # 验证进程存活
+            pid = data.get("pid")
+            if pid and not psutil.pid_exists(pid):
+                remove_status()
+                return None
+
+            return data
     except (OSError, json.JSONDecodeError):
         return None
 

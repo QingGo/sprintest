@@ -3,7 +3,6 @@ import os
 import signal
 import socket
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import AsyncGenerator
@@ -23,12 +22,14 @@ from sprintest.service import TestService
 from sprintest.status import (
     ensure_sprintest_dir,
     get_socket_path,
+    get_sprintest_dir,
     remove_socket,
     remove_status,
     write_status,
 )
 
 # Setup daemon logger (with file output)
+DAEMON_LOCK_FILE = os.path.join(get_sprintest_dir(), "daemon.lock")
 logger = setup_logger("sprintest.daemon", is_daemon=True)
 
 
@@ -45,7 +46,6 @@ class TestRunResponse(BaseModel):
 
 # Global state
 test_service = TestService()
-DAEMON_LOCK_FILE = os.path.join(tempfile.gettempdir(), "sprintest_global.lock")
 shutdown_event = threading.Event()
 
 
