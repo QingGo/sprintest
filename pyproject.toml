@@ -18,6 +18,7 @@ dependencies = [
     "requests",
     "pytest",
     "tomli>=2.4.1",
+    "httpx>=0.28.1",
 ]
 keywords = ["testing", "pytest", "ai", "preloading", "hot-reload"]
 classifiers = [

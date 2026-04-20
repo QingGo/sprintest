@@ -1,16 +1,38 @@
-import json
 import os
-import socket
 import subprocess
 import sys
 import time
-from typing import Any
+from collections.abc import Generator
+from contextlib import contextmanager
+from typing import Any, cast
 
-import requests
+import httpx
 
 from sprintest import constants
 from sprintest.logger import logger
 from sprintest.status import read_status
+
+
+class RequestsShim:
+    def __init__(self, response: httpx.Response):
+        self.response = response
+
+    def iter_content(
+        self, chunk_size: int | None = None, decode_unicode: bool = False
+    ) -> Generator[str | bytes, None, None]:
+        if decode_unicode:
+            yield from self.response.iter_text()
+        else:
+            yield from self.response.iter_bytes()
+
+    def json(self) -> Any:
+        return self.response.json()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self.response.json().get(key, default)
+        except Exception:
+            return default
 
 
 class DaemonClient:
@@ -39,97 +61,107 @@ class DaemonClient:
                 return True
         return False
 
-    def send_request(
-        self, command: str, payload: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
-        """Send a request to the daemon, handling both Unix and TCP."""
+    @contextmanager
+    def _get_client(self) -> Generator[httpx.Client, None, None]:
+        """Create an httpx.Client configured for the current daemon state."""
+        status = read_status()
+
+        # Priority 1: Environment variable port
         env_port = os.environ.get(constants.ENV_PORT)
         if env_port:
-            try:
-                return self._send_tcp_request(env_port, command, payload or {})
-            except Exception:
-                pass
+            with httpx.Client(
+                base_url=f"http://127.0.0.1:{env_port}", timeout=None, trust_env=False
+            ) as client:
+                yield client
+                return
 
-        status = read_status()
+        # Priority 2: Status file (Unix or TCP)
         if status:
             if status.get("type") == "unix":
-                try:
-                    return self._send_unix_request(
-                        status["socket_path"], {"command": command, **(payload or {})}
-                    )
-                except Exception:
-                    pass
+                transport = httpx.HTTPTransport(uds=status["socket_path"])
+                with httpx.Client(
+                    transport=transport,
+                    base_url="http://127.0.0.1",
+                    timeout=None,
+                    trust_env=False,
+                ) as client:
+                    yield client
+                    return
+            else:
+                port = status.get("port", self.default_port)
+                with httpx.Client(
+                    base_url=f"http://127.0.0.1:{port}", timeout=None, trust_env=False
+                ) as client:
+                    yield client
+                    return
 
-            port = status.get("port", self.default_port)
-            try:
-                return self._send_tcp_request(port, command, payload or {})
-            except Exception:
-                pass
-
+        # Priority 3: Start daemon if missing
         if self.start_daemon():
             status = read_status()
             if status:
                 if status.get("type") == "unix":
-                    return self._send_unix_request(
-                        status["socket_path"], {"command": command, **(payload or {})}
-                    )
+                    transport = httpx.HTTPTransport(uds=status["socket_path"])
+                    with httpx.Client(
+                        transport=transport,
+                        base_url="http://127.0.0.1",
+                        timeout=None,
+                        trust_env=False,
+                    ) as client:
+                        yield client
+                        return
                 else:
-                    return self._send_tcp_request(
-                        status.get("port", self.default_port), command, payload or {}
-                    )
+                    port = status.get("port", self.default_port)
+                    with httpx.Client(
+                        base_url=f"http://127.0.0.1:{port}",
+                        timeout=None,
+                        trust_env=False,
+                    ) as client:
+                        yield client
+                        return
+
+        # Final fallback
+        with httpx.Client(
+            base_url=f"http://127.0.0.1:{self.default_port}",
+            timeout=None,
+            trust_env=False,
+        ) as client:
+            yield client
+
+    def send_request(
+        self, command: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Send a request to the daemon."""
+        with self._get_client() as client:
+            if command == "status":
+                resp = client.get("/v1/status", timeout=constants.HTTP_TIMEOUT)
+            elif command == "stop":
+                resp = client.post("/v1/stop", timeout=constants.HTTP_TIMEOUT)
+            elif command == "run_test":
+                resp = client.post("/v1/test/run", json=payload)
             else:
-                p = os.environ.get(constants.ENV_PORT)
-                if p:
-                    return self._send_tcp_request(p, command, payload or {})
+                raise ValueError(f"Unknown command: {command}")
 
-        return self._send_tcp_request(self.default_port, command, payload or {})
-
-    def _send_unix_request(self, socket_path: str, request_data: dict) -> dict:
-        """Send a request via Unix socket."""
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client_socket:
-            client_socket.connect(socket_path)
-            request_json = json.dumps(request_data).encode("utf-8") + b"\n\n"
-            client_socket.sendall(request_json)
-
-            response_data = b""
-            while True:
-                chunk = client_socket.recv(4096)
-                if not chunk:
-                    break
-                response_data += chunk
-                if b"\n\n" in response_data:
-                    break
-
-            if not response_data:
-                raise Exception("No response from daemon")
-
-            return json.loads(response_data.decode("utf-8"))  # type: ignore
-
-    def _send_tcp_request(self, port: int | str, command: str, payload: dict) -> dict:
-        """Send a request via TCP/HTTP."""
-        base_url = f"http://localhost:{port}/v1"
-
-        if command == "status":
-            resp = requests.get(f"{base_url}/status", timeout=constants.HTTP_TIMEOUT)
-        elif command == "stop":
-            resp = requests.post(f"{base_url}/stop", timeout=constants.HTTP_TIMEOUT)
-        elif command == "run_test":
-            resp = requests.post(f"{base_url}/test/run", json=payload, timeout=None)
-        else:
-            raise ValueError(f"Unknown command: {command}")
-
-        resp.raise_for_status()
-        return resp.json()  # type: ignore
+            resp.raise_for_status()
+            return cast("dict[str, Any]", resp.json())
 
     def stream_test_run(self, payload: dict[str, Any]) -> Any:
         """Stream test results from the daemon."""
-        port = os.environ.get(constants.ENV_PORT)
-        if not port:
-            status = read_status()
-            if status and status.get("type") == "tcp":
-                port = status.get("port")
-            else:
-                port = self.default_port
+        status = read_status()
+        if status and status.get("type") == "unix":
+            transport = httpx.HTTPTransport(uds=status["socket_path"])
+            client = httpx.Client(
+                transport=transport,
+                base_url="http://127.0.0.1",
+                timeout=None,
+                trust_env=False,
+            )
+        else:
+            port = (status or {}).get(
+                "port", os.environ.get(constants.ENV_PORT, self.default_port)
+            )
+            client = httpx.Client(
+                base_url=f"http://127.0.0.1:{port}", timeout=None, trust_env=False
+            )
 
-        url = f"http://localhost:{port}/v1/test/run/stream"
-        return requests.post(url, json=payload, timeout=None, stream=True)
+        resp = client.post("/v1/test/run/stream", json=payload)
+        return RequestsShim(resp)

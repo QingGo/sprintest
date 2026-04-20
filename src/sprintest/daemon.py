@@ -1,6 +1,5 @@
 import asyncio
 import importlib
-import json
 import os
 import signal
 import socket
@@ -8,6 +7,8 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import psutil
@@ -43,7 +44,14 @@ class TestRunResponse(BaseModel):
     nuked_modules_count: int
 
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Lifespan context manager for FastAPI."""
+    pre_load_package()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 # Global state
 test_runner = TestRunner()
@@ -172,81 +180,6 @@ def handle_exit(sig: int, frame: Any) -> None:
     sys.exit(0)
 
 
-def run_unix_socket_server(socket_path: str) -> None:
-    """Run Unix socket server in a separate thread."""
-    try:
-        server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server_socket.settimeout(1.0)
-        server_socket.bind(socket_path)
-        server_socket.listen(5)
-
-        while not shutdown_event.is_set():
-            try:
-                client_socket, _ = server_socket.accept()
-            except TimeoutError:
-                continue
-
-            try:
-                data = b""
-                while True:
-                    chunk = client_socket.recv(4096)
-                    if not chunk:
-                        break
-                    data += chunk
-                    if b"\n\n" in data:
-                        break
-                if not data:
-                    continue
-
-                req = json.loads(data.decode("utf-8"))
-                cmd = req.get("command")
-                if cmd == "run_test":
-                    args = req.get("args", [])
-                    t_pkg = req.get("target_pkg") or os.environ.get(
-                        constants.ENV_TARGET_PKG
-                    )
-                    if not t_pkg:
-                        resp = {
-                            "exit_code": 1,
-                            "output": "target_pkg missing",
-                            "nuked_modules_count": 0,
-                        }
-                    else:
-                        with test_lock:
-                            logger.info(f"Unix Socket: Running tests for {t_pkg}")
-                            exit_code, output, nuked_count = test_runner.run_tests(
-                                args, t_pkg
-                            )
-                            resp = {
-                                "exit_code": exit_code,
-                                "output": output,
-                                "nuked_modules_count": nuked_count,
-                            }
-                elif cmd == "status":
-                    resp = {"status": "running", "version": constants.VERSION}
-                elif cmd == "stop":
-                    resp = {"message": "Shutting down..."}
-                    logger.info("Unix Socket: Stop request received.")
-
-                    def do_shutdown_unix_sock() -> None:
-                        time.sleep(0.5)
-                        os.kill(os.getpid(), signal.SIGTERM)
-
-                    threading.Thread(target=do_shutdown_unix_sock, daemon=True).start()
-                else:
-                    resp = {"error": "Unknown command"}
-                client_socket.sendall(json.dumps(resp).encode("utf-8") + b"\n\n")
-            except Exception as e:
-                logger.error(f"Unix socket handling error: {e}")
-            finally:
-                client_socket.close()
-    except Exception as e:
-        if not shutdown_event.is_set():
-            logger.error(f"Unix socket server failed: {e}")
-    finally:
-        remove_socket()
-
-
 def pre_load_package() -> None:
     """Pre-load the target package if specified."""
     if os.getcwd() not in sys.path:
@@ -271,8 +204,8 @@ def pre_load_package() -> None:
                 logger.warning(f"Failed to pre-load {pkg_name}: {e}")
 
 
-def setup_servers() -> None:
-    """Set up Unix and TCP servers."""
+def setup_servers() -> tuple[str | None, int | None]:
+    """Determine server configuration and write status."""
     use_unix = (
         hasattr(socket, "AF_UNIX") and os.environ.get(constants.ENV_FORCE_TCP) != "1"
     )
@@ -280,10 +213,6 @@ def setup_servers() -> None:
         ensure_sprintest_dir()
         socket_path = get_socket_path()
         remove_socket()
-
-        threading.Thread(
-            target=run_unix_socket_server, args=(socket_path,), daemon=True
-        ).start()
 
         write_status(
             {
@@ -293,7 +222,8 @@ def setup_servers() -> None:
                 "type": "unix",
             }
         )
-        logger.info(f"Daemon started with Unix socket: {socket_path}")
+        logger.info(f"Daemon configured with Unix socket: {socket_path}")
+        return socket_path, None
     else:
         port = int(os.environ.get(constants.ENV_PORT, constants.DEFAULT_PORT))
         write_status(
@@ -304,7 +234,8 @@ def setup_servers() -> None:
                 "type": "tcp",
             }
         )
-        logger.info(f"Daemon started with TCP port: {port}")
+        logger.info(f"Daemon configured with TCP port: {port}")
+        return None, port
 
 
 def run() -> None:
@@ -319,17 +250,29 @@ def run() -> None:
         sys.exit(1)
 
     try:
-        pre_load_package()
-        setup_servers()
+        socket_path, port = setup_servers()
 
         if os.environ.get(constants.ENV_SKIP_UVICORN) != "1":
-            port = int(os.environ.get(constants.ENV_PORT, constants.DEFAULT_PORT))
-            logger.info(f"Starting Uvicorn on port {port}")
-            uvicorn.run(
-                app, host=constants.DEFAULT_HOST, port=port, log_level="warning"
-            )
+            if socket_path:
+                logger.info(f"Starting Uvicorn on Unix socket: {socket_path}")
+                uvicorn.run(
+                    "sprintest.daemon:app", uds=socket_path, log_level="warning"
+                )
+            else:
+                p = port or int(
+                    os.environ.get(constants.ENV_PORT, constants.DEFAULT_PORT)
+                )
+                logger.info(f"Starting Uvicorn on port {p}")
+                uvicorn.run(
+                    "sprintest.daemon:app",
+                    host=constants.DEFAULT_HOST,
+                    port=p,
+                    log_level="warning",
+                )
     finally:
         release_daemon_lock()
+        remove_socket()
+        remove_status()
 
 
 if __name__ == "__main__":

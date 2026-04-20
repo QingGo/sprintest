@@ -96,7 +96,7 @@ def daemon_service(
                 error_msg=f"Unix socket {socket_path} was not created",
             )
         else:
-            url = f"http://localhost:{port}/v1/status"
+            url = f"http://127.0.0.1:{port}/v1/status"
             wait_for_condition(
                 lambda: requests.get(url, timeout=0.1).status_code == 200,
                 timeout=5.0,
