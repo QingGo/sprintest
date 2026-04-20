@@ -18,6 +18,7 @@ def setup_logger(name: str = "sprintest", is_daemon: bool = False) -> logging.Lo
     level_str = os.environ.get(constants.ENV_LOG_LEVEL, "INFO").upper()
     level = getattr(logging, level_str, logging.INFO)
     logger.setLevel(level)
+    logger.propagate = False
 
     # Formatter
     formatter = logging.Formatter(

@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from sprintest import constants
-from sprintest.discovery import discover_package_path
+from sprintest.discovery import discover_package_path, find_target_pkg
 from sprintest.logger import setup_logger
 from sprintest.paths import ensure_sprintest_dir, get_socket_path, get_sprintest_dir
 from sprintest.service import TestService
@@ -189,11 +189,16 @@ def handle_exit(sig: int, frame: Any) -> None:
 
 
 def pre_load_package() -> None:
-    """Pre-load the target package if specified."""
+    """Pre-load the target package if specified or auto-discoverable."""
     if os.getcwd() not in sys.path:
         sys.path.insert(0, os.getcwd())
 
     target_pkg = os.environ.get(constants.ENV_TARGET_PKG)
+    if not target_pkg:
+        target_pkg = find_target_pkg()
+        if target_pkg:
+            logger.info(f"Auto-detected target package for pre-load: {target_pkg}")
+
     if target_pkg:
         pkg_name = target_pkg.replace("-", "_")
         target_pkg_path = os.environ.get(
