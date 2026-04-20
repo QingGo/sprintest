@@ -27,13 +27,13 @@ In projects involving large language models (LLMs), deep learning frameworks (Py
 
 For AI/ML projects with heavy dependencies (`torch`, `transformers`, etc.), Sprintest provides a massive speedup by eliminating redundant initialization.
 
-| Run Type | Project Type | Total Time |
-| :--- | :--- | :--- |
-| **Pytest (Standard)** | AI/LLM Project | ~6.0s |
-| **Sprintest (First Run)** | AI/LLM Project | ~7.0s |
-| **Sprintest (Warm Start)** | AI/LLM Project | **~2.0s** |
+| Run Type | Total Time |
+| :--- | :--- |
+| **Pytest (Standard)** | ~6.0s |
+| **Sprintest (First Run)** | ~7.0s |
+| **Sprintest (Warm Start)** | **~2.0s** |
 
-*Measured on Mac Intel i7 with a DistilBERT sentiment analysis model. Real-world speedup is typically **10x - 20x** for larger models.*
+*Numbers above are measured on `examples/test_ai_model.py` and are provided for reference only. In heavier real-world projects, speedups typically reach **5x - 10x**—for example, in my other project [engram-peft](https://github.com/QingGo/engram-peft), unit test total wall time improved by **7.8x** (integration tests not included).*
 
 ---
 

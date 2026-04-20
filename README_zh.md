@@ -27,13 +27,13 @@
 
 对于包含重型依赖（如 `torch`, `transformers` 等）的 AI/ML 项目，Sprintest 通过消除重复的初始化过程，提供了巨大的性能提升。
 
-| 运行方式 | 项目类型 | 总计耗时 |
-| :--- | :--- | :--- |
-| **Pytest (标准)** | AI/LLM 项目 | ~6.0s |
-| **Sprintest (首次运行)** | AI/LLM 项目 | ~7.0s |
-| **Sprintest (热启动)** | AI/LLM 项目 | **~2.0s** |
+| 运行方式 | 总计耗时 |
+| :--- | :--- |
+| **Pytest (标准)** | ~6.0s |
+| **Sprintest (首次运行)** | ~7.0s |
+| **Sprintest (热启动)** | **~2.0s** |
 
-*基于 Mac Intel i7 与 DistilBERT 情感分析模型的实测数据。在大型模型项目中，实际加速效果通常可达 **10x - 20x**。*
+*以上数据基于 `examples/test_ai_model.py` 实测，仅供参考。在依赖更为沉重的真实项目中，加速效果通常可达 **5x - 10x**——例如在我的另一个项目 [engram-peft](https://github.com/QingGo/engram-peft) 中，单元测试的总 wall time（端到端耗时）实测提升了 **7.8x**（不含集成测试）。*
 
 ---
 
