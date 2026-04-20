@@ -10,15 +10,10 @@ from sprintest.paths import ensure_sprintest_dir
 def setup_logger(name: str = "sprintest", is_daemon: bool = False) -> logging.Logger:
     logger = logging.getLogger(name)
 
-    # Avoid duplicate handlers if already configured
-    if logger.handlers:
-        return logger
-
     # Set log level from environment or default to INFO
     level_str = os.environ.get(constants.ENV_LOG_LEVEL, "INFO").upper()
     level = getattr(logging, level_str, logging.INFO)
     logger.setLevel(level)
-    logger.propagate = False
 
     # Formatter
     formatter = logging.Formatter(
@@ -26,23 +21,28 @@ def setup_logger(name: str = "sprintest", is_daemon: bool = False) -> logging.Lo
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    # Console handler - only add if no handlers exist
+    if not logger.handlers:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
 
-    # File handler for daemon
+    # File handler for daemon - add if requested and not already present
     if is_daemon:
-        try:
-            ensure_sprintest_dir()
-            log_path = os.path.join(constants.SPRINTEST_DIR, constants.LOG_FILE)
-            file_handler = RotatingFileHandler(
-                log_path, maxBytes=10 * 1024 * 1024, backupCount=5
-            )
-            file_handler.setFormatter(formatter)
-            logger.addHandler(file_handler)
-        except Exception as e:
-            logger.warning(f"Failed to setup file logging: {e}")
+        has_file_handler = any(
+            isinstance(h, RotatingFileHandler) for h in logger.handlers
+        )
+        if not has_file_handler:
+            try:
+                ensure_sprintest_dir()
+                log_path = os.path.join(constants.SPRINTEST_DIR, constants.LOG_FILE)
+                file_handler = RotatingFileHandler(
+                    log_path, maxBytes=10 * 1024 * 1024, backupCount=5
+                )
+                file_handler.setFormatter(formatter)
+                logger.addHandler(file_handler)
+            except Exception as e:
+                logger.warning(f"Failed to setup file logging: {e}")
 
     return logger
 

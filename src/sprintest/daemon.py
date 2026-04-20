@@ -15,7 +15,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-import sprintest.status
 from sprintest import constants
 from sprintest.discovery import discover_package_path, find_target_pkg
 from sprintest.logger import setup_logger
@@ -32,7 +31,7 @@ from sprintest.status import (
     write_status,
 )
 
-logger = setup_logger("sprintest.daemon", is_daemon=True)
+logger = setup_logger("sprintest", is_daemon=True)
 
 
 class TestRunRequest(BaseModel):
@@ -104,6 +103,9 @@ def acquire_daemon_lock() -> bool:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             with os.fdopen(fd, "w") as f:
                 f.write(str(os.getpid()))
+            logger.debug(
+                f"Created resource at absolute path: {os.path.abspath(lock_path)}"
+            )
             return True
         except FileExistsError:
             try:
@@ -116,18 +118,26 @@ def acquire_daemon_lock() -> bool:
                     time.sleep(0.01)
 
                 if not content:
+                    abs_path = os.path.abspath(lock_path)
                     try:
                         os.remove(lock_path)
-                    except OSError:
-                        pass
+                        logger.debug(f"Removing resource at absolute path: {abs_path}")
+                    except OSError as e:
+                        logger.error(
+                            f"Failed to remove empty lock file at {abs_path}: {e}"
+                        )
                     return acquire_daemon_lock()
 
                 pid = int(content)
                 if not psutil.pid_exists(pid):
+                    abs_path = os.path.abspath(lock_path)
                     try:
                         os.remove(lock_path)
-                    except OSError:
-                        pass
+                        logger.debug(f"Removing resource at absolute path: {abs_path}")
+                    except OSError as e:
+                        logger.error(
+                            f"Failed to remove stale lock file at {abs_path}: {e}"
+                        )
                     return acquire_daemon_lock()
                 return False
             except Exception:
@@ -330,11 +340,13 @@ def run() -> None:
         finally:
             remove_socket(orig_socket_path)
             remove_status(orig_status_path)
+            abs_path = os.path.abspath(orig_lock_path)
             try:
                 if os.path.exists(orig_lock_path):
                     os.remove(orig_lock_path)
-            except OSError:
-                pass
+                    logger.debug(f"Removing resource at absolute path: {abs_path}")
+            except OSError as e:
+                logger.error(f"Failed to remove lock file at {abs_path}: {e}")
 
 
 if __name__ == "__main__":

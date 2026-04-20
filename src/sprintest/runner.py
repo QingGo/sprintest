@@ -1,11 +1,13 @@
 import glob
 import importlib
 import io
+import logging
 import os
 import re
 import shutil
 import sys
-from contextlib import redirect_stderr, redirect_stdout
+from collections.abc import Generator
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from typing import Any
 
 import pytest
@@ -144,6 +146,36 @@ class TestRunner:
         pytest_args.extend(["-W", "ignore::pytest.PytestAssertRewriteWarning"])
         return pytest_args
 
+    @contextmanager
+    def sandbox_pytest(self) -> Generator[None, None, None]:
+        """Protect the daemon process from pytest's environment mutations."""
+        # Snapshot standard streams
+        orig_stdout = sys.stdout
+        orig_stderr = sys.stderr
+
+        # Snapshot logging handlers
+        # We take a shallow copy of the list so we can restore the exact references
+        root_logger = logging.getLogger()
+        orig_handlers = root_logger.handlers[:]
+
+        try:
+            yield
+        finally:
+            # Restore standard streams
+            sys.stdout = orig_stdout
+            sys.stderr = orig_stderr
+
+            # Restore logging handlers
+            # Remove any handlers added by pytest or the tests
+            for handler in root_logger.handlers[:]:
+                if handler not in orig_handlers:
+                    root_logger.removeHandler(handler)
+
+            # Re-add any original handlers that might have been removed
+            for handler in orig_handlers:
+                if handler not in root_logger.handlers:
+                    root_logger.addHandler(handler)
+
     def run_tests(
         self, args: list[str], target_pkg: str | None, enable_color: bool = False
     ) -> tuple[int, str, int]:
@@ -155,7 +187,11 @@ class TestRunner:
         stderr_buf = io.StringIO()
 
         try:
-            with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+            with (
+                self.sandbox_pytest(),
+                redirect_stdout(stdout_buf),
+                redirect_stderr(stderr_buf),
+            ):
                 exit_code = pytest.main(pytest_args)
             output = stdout_buf.getvalue() + stderr_buf.getvalue()
         except Exception as e:

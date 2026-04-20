@@ -4,13 +4,15 @@ from typing import Any
 
 import psutil
 
-from sprintest.logger import logger
+from sprintest.logger import setup_logger
 from sprintest.paths import (
     ensure_sprintest_dir,
     get_lock_path,
     get_socket_path,
     get_status_path,
 )
+
+logger = setup_logger("sprintest.status")
 
 
 def write_status(data: dict[str, Any]) -> str:
@@ -22,6 +24,7 @@ def write_status(data: dict[str, Any]) -> str:
         with open(tmp_path, "w") as f:
             json.dump(data, f)
         os.replace(tmp_path, path)
+        logger.debug(f"Created resource at absolute path: {os.path.abspath(path)}")
         return path
     except Exception:
         if os.path.exists(tmp_path):
@@ -83,18 +86,22 @@ def read_lock_pid() -> int | None:
 def remove_status(path: str | None = None) -> None:
     """删除状态文件"""
     path = path or get_status_path()
+    abs_path = os.path.abspath(path)
     if os.path.exists(path):
         try:
             os.remove(path)
-        except OSError:
-            pass
+            logger.debug(f"Removing resource at absolute path: {abs_path}")
+        except OSError as e:
+            logger.error(f"Failed to remove status file at {abs_path}: {e}")
 
 
 def remove_socket(path: str | None = None) -> None:
     """删除 Unix socket 文件"""
     path = path or get_socket_path()
+    abs_path = os.path.abspath(path)
     if os.path.exists(path):
         try:
             os.remove(path)
-        except OSError:
-            pass
+            logger.debug(f"Removing resource at absolute path: {abs_path}")
+        except OSError as e:
+            logger.error(f"Failed to remove socket file at {abs_path}: {e}")
