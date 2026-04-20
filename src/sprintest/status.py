@@ -5,10 +5,15 @@ from typing import Any
 import psutil
 
 from sprintest.logger import logger
-from sprintest.paths import ensure_sprintest_dir, get_socket_path, get_status_path
+from sprintest.paths import (
+    ensure_sprintest_dir,
+    get_lock_path,
+    get_socket_path,
+    get_status_path,
+)
 
 
-def write_status(data: dict[str, Any]) -> None:
+def write_status(data: dict[str, Any]) -> str:
     """写入状态文件"""
     ensure_sprintest_dir()
     path = get_status_path()
@@ -17,6 +22,7 @@ def write_status(data: dict[str, Any]) -> None:
         with open(tmp_path, "w") as f:
             json.dump(data, f)
         os.replace(tmp_path, path)
+        return path
     except Exception:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
@@ -38,7 +44,7 @@ def read_status() -> dict[str, Any] | None:
             pid = data.get("pid")
             if pid and not psutil.pid_exists(pid):
                 logger.warning(f"Removing stale status file (PID {pid} is not running)")
-                remove_status()
+                remove_status(path)
                 return None
 
             return data
@@ -46,16 +52,47 @@ def read_status() -> dict[str, Any] | None:
         return None
 
 
-def remove_status() -> None:
+def read_lock_pid() -> int | None:
+    """Return the PID from the daemon lock file if the process is alive.
+
+    Returns:
+        The living PID, or None if the lock file is absent, stale, or unreadable.
+        A non-None return means a daemon process is running or still starting up.
+    """
+    lock_path = get_lock_path()
+    if not os.path.exists(lock_path):
+        return None
+    try:
+        with open(lock_path) as f:
+            content = f.read().strip()
+        if not content:
+            logger.debug(f"Lock file {lock_path} exists but is empty")
+            return None
+
+        pid = int(content)
+        if psutil.pid_exists(pid):
+            return pid
+        # Stale lock — process is gone
+        logger.debug(f"Lock file {lock_path} is stale (PID {pid} not running)")
+        return None
+    except (OSError, ValueError) as e:
+        logger.debug(f"Failed to read lock file {lock_path}: {e}")
+        return None
+
+
+def remove_status(path: str | None = None) -> None:
     """删除状态文件"""
-    path = get_status_path()
+    path = path or get_status_path()
     if os.path.exists(path):
-        os.remove(path)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
-def remove_socket() -> None:
+def remove_socket(path: str | None = None) -> None:
     """删除 Unix socket 文件"""
-    path = get_socket_path()
+    path = path or get_socket_path()
     if os.path.exists(path):
         try:
             os.remove(path)

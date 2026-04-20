@@ -10,8 +10,10 @@ from sprintest.logger import logger
 
 def handle_status(client: DaemonClient) -> None:
     try:
-        resp = client.send_request("status")
+        resp = client.send_request("status", no_auto_start=True)
         logger.info(f"Sprintest Daemon ({resp['version']}): {resp['status']}")
+    except RuntimeError:
+        logger.info("No Sprintest Daemon is currently running.")
     except Exception as e:
         logger.error(f"Could not reach daemon: {e}")
         sys.exit(1)
@@ -19,8 +21,10 @@ def handle_status(client: DaemonClient) -> None:
 
 def handle_stop(client: DaemonClient) -> None:
     try:
-        resp = client.send_request("stop")
+        resp = client.send_request("stop", no_auto_start=True)
         logger.info(resp.get("message", "Stopping..."))
+    except RuntimeError:
+        logger.info("No Sprintest Daemon is currently running.")
     except Exception as e:
         logger.error(f"Could not stop daemon: {e}")
         sys.exit(1)

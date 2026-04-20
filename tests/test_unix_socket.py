@@ -147,7 +147,9 @@ def test_uvicorn_run_fd_does_not_trigger_chmod(
     sock.bind(socket_path)
 
     try:
-        config = uvicorn.Config("sprintest.daemon:app", fd=sock.fileno())
+        config = uvicorn.Config(
+            "sprintest.daemon:app", fd=sock.fileno(), log_config=None
+        )
         # The key assertion: config.uds should be None when fd= is used,
         # which is what prevents uvicorn from calling chmod internally.
         assert config.uds is None, (

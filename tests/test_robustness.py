@@ -55,9 +55,14 @@ def test_stale_status_recovery(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -
     remove_status()
 
 
-def test_unresponsive_daemon_restart(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify client restarts daemon if it's alive but not responding to HTTP."""
-    # Start a dummy process that doesn't listen on the port
+def test_status_trusted_without_health_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify _get_client() trusts status.json without a health-check round-trip.
+
+    Under the new design, status.json is written only after uvicorn's lifespan
+    runs (i.e., the socket is bound and requests can be accepted).  Therefore
+    the client must NOT perform a separate health check; it should use the
+    connection details from status.json directly.
+    """
     proc = subprocess.Popen(["sleep", "10"])
     try:
         write_status(
@@ -72,23 +77,27 @@ def test_unresponsive_daemon_restart(monkeypatch: pytest.MonkeyPatch) -> None:
 
         client = DaemonClient(port="8890")
 
-        # Mock start_daemon to verify it's called
+        # _get_client() should yield a client pointed at port 8890
+        # without calling start_daemon() at all.
         called: list[bool] = []
 
         def mock_start() -> bool:
             called.append(True)
-            return False  # Stop here
+            return False
 
         monkeypatch.setattr(client, "start_daemon", mock_start)
 
-        # Should attempt to start daemon because 8890 is unresponsive
         try:
-            with client._get_client():
-                pass
+            with client._get_client() as c:
+                assert "8890" in str(c.base_url)
         except Exception:
+            # Connection will be refused (no server listening) — that's expected;
+            # the important assertion is that start_daemon was NOT called.
             pass
 
-        assert len(called) > 0
+        assert len(called) == 0, (
+            "start_daemon should not be called when status.json is present"
+        )
     finally:
         proc.terminate()
         remove_status()
@@ -124,7 +133,8 @@ def test_concurrency_lock_atomicity(
     """Verify lock atomicity by having multiple threads attempt to start daemon simultaneously."""
     monkeypatch.setenv("SPRINTEST_DIR", str(tmp_path))
 
-    from sprintest.daemon import acquire_daemon_lock, release_daemon_lock
+    from sprintest.daemon import acquire_daemon_lock
+    from sprintest.paths import get_lock_path
 
     results: list[bool] = []
 
@@ -142,4 +152,7 @@ def test_concurrency_lock_atomicity(
     assert success_count == 1
 
     # Cleanup for next test
-    release_daemon_lock()
+    try:
+        os.remove(get_lock_path())
+    except OSError:
+        pass

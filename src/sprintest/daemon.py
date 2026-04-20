@@ -15,24 +15,22 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+import sprintest.status
 from sprintest import constants
 from sprintest.discovery import discover_package_path, find_target_pkg
 from sprintest.logger import setup_logger
-from sprintest.paths import ensure_sprintest_dir, get_socket_path, get_sprintest_dir
+from sprintest.paths import (
+    ensure_sprintest_dir,
+    get_lock_path,
+    get_socket_path,
+    get_status_path,
+)
 from sprintest.service import TestService
 from sprintest.status import (
     remove_socket,
     remove_status,
     write_status,
 )
-
-
-def get_lock_path() -> str:
-    """Get the current daemon lock file path."""
-    return os.environ.get(
-        "SPRINTEST_LOCK_FILE", os.path.join(get_sprintest_dir(), "daemon.lock")
-    )
-
 
 logger = setup_logger("sprintest.daemon", is_daemon=True)
 
@@ -55,7 +53,37 @@ shutdown_event = threading.Event()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Lifespan context manager for FastAPI."""
+    """Lifespan context manager for FastAPI.
+
+    status.json is written here, AFTER uvicorn has bound its socket and is
+    ready to serve requests.  This guarantees that any client polling
+    read_status() can immediately connect without a separate health-check.
+
+    Note: uvicorn.run() with a string app reference reimports this module,
+    so we cannot rely on a module-level _server_config set by setup_servers().
+    Instead we reconstruct the config from well-known paths and env vars.
+    """
+    use_unix = (
+        hasattr(socket, "AF_UNIX") and os.environ.get(constants.ENV_FORCE_TCP) != "1"
+    )
+    if use_unix:
+        config: dict[str, Any] = {
+            "pid": os.getpid(),
+            "socket_path": get_socket_path(),
+            "version": constants.VERSION,
+            "type": "unix",
+            "start_time": time.time(),
+        }
+    else:
+        config = {
+            "pid": os.getpid(),
+            "port": int(os.environ.get(constants.ENV_PORT, constants.DEFAULT_PORT)),
+            "version": constants.VERSION,
+            "type": "tcp",
+            "start_time": time.time(),
+        }
+    write_status(config)
+    logger.debug("status.json written — daemon is ready to accept connections.")
     pre_load_package()
     yield
 
@@ -67,24 +95,18 @@ _lock_internal = threading.Lock()
 
 
 def acquire_daemon_lock() -> bool:
+    """Acquire the daemon lock file."""
     with _lock_internal:
         ensure_sprintest_dir()
         lock_path = get_lock_path()
 
-        # Try to create the file atomically
         try:
-            # Open with O_EXCL to ensure atomic creation
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            try:
-                os.write(fd, str(os.getpid()).encode())
-            finally:
-                os.close(fd)
+            with os.fdopen(fd, "w") as f:
+                f.write(str(os.getpid()))
             return True
         except FileExistsError:
-            # File exists, check if it's stale
             try:
-                # Give the other process a tiny bit of time to write its PID
-                # if it just created the file
                 content = ""
                 for _ in range(3):
                     with open(lock_path) as f:
@@ -94,7 +116,6 @@ def acquire_daemon_lock() -> bool:
                     time.sleep(0.01)
 
                 if not content:
-                    # Still empty? Probably stale or crashed during creation
                     try:
                         os.remove(lock_path)
                     except OSError:
@@ -103,31 +124,16 @@ def acquire_daemon_lock() -> bool:
 
                 pid = int(content)
                 if not psutil.pid_exists(pid):
-                    # Stale lock, remove and retry
                     try:
                         os.remove(lock_path)
                     except OSError:
                         pass
                     return acquire_daemon_lock()
                 return False
-            except (OSError, ValueError):
-                # Error reading or corrupted content, try to remove and retry
-                try:
-                    os.remove(lock_path)
-                except OSError:
-                    pass
-                return acquire_daemon_lock()
+            except Exception:
+                return False
         except Exception:
             return False
-
-
-def release_daemon_lock() -> None:
-    lock_path = get_lock_path()
-    try:
-        if os.path.exists(lock_path):
-            os.remove(lock_path)
-    except Exception:
-        pass
 
 
 @app.post("/v1/test/run")
@@ -179,12 +185,15 @@ def stop() -> dict[str, str]:
 
 
 def handle_exit(sig: int, frame: Any) -> None:
-    """Graceful shutdown handler."""
-    logger.info(f"Daemon received signal {sig}, shutting down...")
+    """Signal handler: mark shutdown and exit via SystemExit.
+
+    Cleanup (lock / socket / status) is handled exclusively by the
+    finally block in run(), which catches SystemExit just like any
+    other exception.  Do NOT perform cleanup here to avoid double-
+    removal races.
+    """
+    logger.info(f"Daemon received signal {sig}, initiating graceful shutdown...")
     shutdown_event.set()
-    remove_socket()
-    remove_status()
-    release_daemon_lock()
     sys.exit(0)
 
 
@@ -218,49 +227,36 @@ def pre_load_package() -> None:
 
 
 def setup_servers() -> tuple[str | None, int | None]:
-    """Determine server configuration and write status."""
+    """Determine server configuration.
+
+    Does NOT write status.json here — that is deferred to lifespan() so
+    that the file only appears once uvicorn is truly ready to serve.
+    """
     ensure_sprintest_dir()
     use_unix = (
         hasattr(socket, "AF_UNIX") and os.environ.get(constants.ENV_FORCE_TCP) != "1"
     )
     if use_unix:
         socket_path = get_socket_path()
-        remove_socket()
 
-        write_status(
-            {
-                "pid": os.getpid(),
-                "socket_path": socket_path,
-                "version": constants.VERSION,
-                "type": "unix",
-                "start_time": time.time(),
-            }
-        )
+        remove_socket()
         logger.info(f"Daemon configured with Unix socket: {socket_path}")
         return socket_path, None
     else:
         port = int(os.environ.get(constants.ENV_PORT, constants.DEFAULT_PORT))
-        write_status(
-            {
-                "pid": os.getpid(),
-                "port": port,
-                "version": constants.VERSION,
-                "type": "tcp",
-                "start_time": time.time(),
-            }
-        )
         logger.info(f"Daemon configured with TCP port: {port}")
         return None, port
 
 
 def run() -> None:
-    # Set up signal handlers
-    try:
-        signal.signal(signal.SIGTERM, handle_exit)
-        signal.signal(signal.SIGINT, handle_exit)
-    except ValueError:
-        # Signals only work in the main thread; ignore in other environments (like some tests)
-        pass
+    # Cache the original paths immediately upon startup.
+    # Because pytest.main() runs inside this process, tests might
+    # modify os.getcwd() or os.environ["SPRINTEST_DIR"].
+    # Using local variables guarantees we clean up the actual files
+    # we created, regardless of any later environment drift.
+    orig_lock_path = get_lock_path()
+    orig_socket_path = get_socket_path()
+    orig_status_path = get_status_path()
 
     if not acquire_daemon_lock():
         logger.error(
@@ -268,7 +264,22 @@ def run() -> None:
         )
         sys.exit(1)
 
+    # Everything after lock acquisition is wrapped in try/finally so that
+    # cleanup runs unconditionally — whether we exit normally, via an
+    # unhandled exception, or via SystemExit raised by handle_exit.
     try:
+        # Register signal handlers INSIDE the try block.  If a signal
+        # arrives before this point the Python default handler runs
+        # (KeyboardInterrupt / termination), which also propagates through
+        # the finally clause below — safe either way.
+        try:
+            signal.signal(signal.SIGTERM, handle_exit)
+            signal.signal(signal.SIGINT, handle_exit)
+        except ValueError:
+            # Signals can only be registered from the main thread;
+            # ignore in test environments that run in worker threads.
+            pass
+
         socket_path, port = setup_servers()
 
         if os.environ.get(constants.ENV_SKIP_UVICORN) != "1":
@@ -308,9 +319,22 @@ def run() -> None:
                     log_level="warning",
                 )
     finally:
-        release_daemon_lock()
-        remove_socket()
-        remove_status()
+        # Single, authoritative cleanup point.  Runs for all exit paths:
+        #   - Normal uvicorn shutdown (SIGTERM handled by uvicorn itself)
+        #   - SystemExit raised by handle_exit (SIGTERM/SIGINT before uvicorn starts)
+        #   - Unhandled exceptions during setup
+        try:
+            logger.info("Daemon exiting: releasing lock, socket, and status files.")
+        except Exception:
+            pass
+        finally:
+            remove_socket(orig_socket_path)
+            remove_status(orig_status_path)
+            try:
+                if os.path.exists(orig_lock_path):
+                    os.remove(orig_lock_path)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
