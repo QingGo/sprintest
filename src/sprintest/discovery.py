@@ -2,26 +2,22 @@ import ast
 import os
 import sys
 
-# Conditional import for tomli
-try:
-    import tomli
-except ImportError:
-    if sys.version_info >= (3, 11):
-        try:
-            import tomllib as tomli  # type: ignore
-        except ImportError:
-            tomli = None  # type: ignore
-    else:
-        tomli = None  # type: ignore
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    try:
+        import tomli as tomllib  # type: ignore
+    except ImportError:
+        tomllib = None  # type: ignore
 
 
 def find_target_pkg() -> str | None:
     """Automatically discover the target package name from pyproject.toml, setup.py, or directory structure."""
     # 1. Try pyproject.toml
-    if os.path.exists("pyproject.toml") and tomli is not None:
+    if os.path.exists("pyproject.toml") and tomllib is not None:
         try:
             with open("pyproject.toml", "rb") as f:
-                config = tomli.load(f)
+                config = tomllib.load(f)
             if (
                 "project" in config
                 and "name" in config["project"]

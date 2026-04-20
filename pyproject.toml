@@ -11,7 +11,7 @@ authors = [
 ]
 license = { text = "MIT" }
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 dependencies = [
     "fastapi",
     "uvicorn",
@@ -99,4 +99,8 @@ dev = [
     "ruff>=0.15.11",
     "httpx",
     "twine>=6.2.0",
+    "torch==2.2.2",
+    "transformers<4.40",
+    "types-psutil>=7.2.2.20260408",
+    "numpy<2.0",
 ]
