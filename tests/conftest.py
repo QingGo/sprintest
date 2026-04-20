@@ -7,8 +7,8 @@ from collections.abc import Callable, Generator
 from contextlib import closing
 from typing import Any
 
+import httpx
 import pytest
-import requests
 
 from sprintest import constants
 from sprintest.status import get_socket_path, remove_socket
@@ -98,7 +98,7 @@ def daemon_service(
         else:
             url = f"http://127.0.0.1:{port}/v1/status"
             wait_for_condition(
-                lambda: requests.get(url, timeout=0.1).status_code == 200,
+                lambda: httpx.get(url, timeout=0.1, trust_env=False).status_code == 200,
                 timeout=5.0,
                 error_msg=f"Daemon failed to start on port {port}",
             )

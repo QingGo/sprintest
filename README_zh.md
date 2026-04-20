@@ -1,67 +1,107 @@
 # Sprintest
 
 [![PyPI version](https://img.shields.io/pypi/v/sprintest.svg)](https://pypi.org/project/sprintest/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-[简体中文] | [English](README.md)
+[English](README.md) | [简体中文]
 
-Sprintest 是一个专门为重型 AI 项目设计的 C/S（客户端-服务端）架构测试运行器。它通过将大型模型和数据集保留在内存中，解决了由于加载缓慢导致的测试启动延迟问题。
+**Sprintest** 是一款专为重型 AI/ML 项目设计的 Client-Server (C/S) 架构测试运行器。
 
-## 核心优势
+在涉及大型语言模型 (LLMs)、深度学习框架 (PyTorch, TensorFlow) 或海量数据集的项目中，传统的测试运行器启动极其缓慢（通常需要 30 秒到数分钟），因为每次运行都需要重新初始化整个环境。**Sprintest 通过将沉重的依赖项预先加载到内存中，彻底解决了这一痛点。**
 
-- **智能预加载**：将重量级依赖（如 PyTorch、Transformers 或大型数据集）加载到 daemon 进程中，支持自动搜索包路径或手动指定路径，将测试启动时间从分钟级缩短到秒级。
-- **强力热重载**：自动检测并清理当前目录中修改过的模块，确保测试在最新代码上运行，而无需重启 daemon。
-- **灵活配置**：支持通过环境变量自定义端口、目标包名和包路径，适应不同项目结构和命名约定。
-- **Agent 友好**：专为 AI 编程助手设计——提供快速的反馈循环、纯净的输出（无 ANSI 字符）以及稳定的通信。
+---
 
-## 安装
+## 🚀 核心亮点
+
+- **⚡ 极速反馈**：将测试启动时间从分钟级降至毫秒级。通过后台 Daemon 进程保持框架和模型常驻内存，实现“即改即跑”。
+- **🔄 智能热重载**：内置 "Nuke Engine"（模块清理引擎），能够外科手术般地仅卸载项目中已修改的模块，确保测试基于最新代码运行，同时无需重新加载重型依赖。
+- **🔌 统一传输层**：自动感应环境，在 **Unix Domain Sockets (UDS)**（零延迟本地通信）与 **TCP**（最大兼容性）之间无缝切换。
+- **🛠️ 解耦架构**：采用健壮的业务服务层和原子化状态管理，确保在重型测试执行期间通信依然稳定可靠。
+- **🤖 开发者/Agent 友好**：专为 AI 编码助手（如 Antigravity, Cursor）优化，提供纯净的无 ANSI 输出和可靠的守护进程状态追踪。
+- **🎯 可灵活配置**：支持通过 `pyproject.toml` 配置 `ignore_patterns`，防止特定的重型模块被意外重载。
+
+---
+
+## 🏗️ 项目架构
+
+Sprintest 采用解耦架构，确保即使在执行繁重的测试任务时，守护进程依然能快速响应。
+
+```mermaid
+graph TD
+    Client[客户端 CLI] -->|HTTP over UDS/TCP| Daemon[FastAPI 守护进程]
+    Daemon -->|Lifespan| Preloader[包预加载器]
+    Daemon --> Service[测试服务层]
+    Service -->|原子锁| Service
+    Service --> Nuke[清理引擎]
+    Nuke -->|策略| PySys[sys.modules]
+    Service --> Runner[Pytest 运行器]
+    Runner -->|IO 重定向| Tests[用户测试文件]
+    Daemon -.-> Status[(status.json)]
+    Client -.-> Status
+```
+
+---
+
+## 📦 安装
 
 ```bash
 pip install sprintest
 ```
 
+---
 
-
-## 快速开始
+## 📖 快速上手
 
 1. **运行测试**：
-   在项目根目录下直接运行：
+   直接运行 `stest` 命令。如果守护进程尚未启动，它会自动在后台启动。
    ```bash
-   sprintest tests/your_test_file.py
+   stest tests/test_model_loading.py
    ```
-   
-   系统会自动检测并启动 Sprintest Daemon（如果尚未运行）。
 
-2. **手动管理 Daemon**（可选）：
-   - 查看状态：`sprintest status`
-   - 停止 Daemon：`sprintest stop`
-   - 手动启动：`sprintest-daemon`
+2. **查看守护进程状态**：
+   ```bash
+   stest status
+   ```
 
-## 配置项
+3. **停止守护进程**：
+   ```bash
+   stest stop
+   ```
 
-您可以通过环境变量自定义 Sprintest：
+---
 
-- `SPRINTEST_TARGET_PKG`：设置需要热重载的包名（例如您的项目主包名）。这可以确保您的源码变动被正确检测。
-- `SPRINTEST_TARGET_PKG_PATH`：设置目标包的具体路径（可选）。当自动搜索无法找到包时，可以使用此选项直接指定路径。
-- `SPRINTEST_PORT`：当 Unix socket 不可用时的 TCP 端口（默认：`8000`）。
+## ⚙️ 配置说明
 
-示例：
-```bash
-export SPRINTEST_PORT=8001
-export SPRINTEST_TARGET_PKG=my_project
-sprintest-daemon
+### 环境变量
+- `SPRINTEST_TARGET_PKG`: 你正在开发的包名。Sprintest 会优先对该包进行热重载。
+- `SPRINTEST_FORCE_TCP`: 设置为 `1` 时，强制使用 TCP 替代 Unix Sockets 通信。
+- `SPRINTEST_PORT`: 自定义 TCP 端口（默认为 `8000`）。
+
+### 进阶配置：`pyproject.toml`
+你可以通过配置忽略列表，防止特定模块在热重载时被清理：
+
+```toml
+[tool.sprintest]
+ignore = [
+    "torch.*",
+    "transformers.*",
+    "heavy_module_to_keep"
+]
 ```
 
-指定路径的示例：
-```bash
-export SPRINTEST_TARGET_PKG=engram-peft
-export SPRINTEST_TARGET_PKG_PATH=/path/to/engram-peft/src
-sprintest-daemon
-```
+---
 
-## 回归测试
+## 🧪 开发与测试
 
-为了确保稳定性，Sprintest 包含集成测试。使用标准的 pytest 运行：
+如果你想验证 Sprintest 自身的基础设施稳定性：
 
 ```bash
 uv run pytest tests
 ```
+
+---
+
+## 📄 开源协议
+
+MIT License. 详见 [LICENSE](LICENSE) 文件。

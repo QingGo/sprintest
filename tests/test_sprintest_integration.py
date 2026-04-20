@@ -4,8 +4,8 @@ import sys
 import threading
 from typing import Any
 
+import httpx
 import pytest
-import requests
 
 
 def run_cli(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
@@ -70,13 +70,14 @@ def test_concurrency_lock(daemon_service: dict[str, Any], tmp_path: Any) -> None
 
     def send_first_request() -> None:
         try:
-            response = requests.post(
-                f"http://localhost:{daemon_service['port']}/v1/test/run",
+            response = httpx.post(
+                f"http://127.0.0.1:{daemon_service['port']}/v1/test/run",
                 json={
                     "args": [str(test_file)],
                     "target_pkg": "sprintest",
                 },
                 timeout=10,
+                trust_env=False,
             )
             results["res1"] = response.json()
         except Exception as e:
@@ -89,10 +90,11 @@ def test_concurrency_lock(daemon_service: dict[str, Any], tmp_path: Any) -> None
 
     time.sleep(0.3)
 
-    response2 = requests.post(
-        f"http://localhost:{daemon_service['port']}/v1/test/run",
+    response2 = httpx.post(
+        f"http://127.0.0.1:{daemon_service['port']}/v1/test/run",
         json={"args": [str(test_file)], "target_pkg": "sprintest"},
         timeout=5,
+        trust_env=False,
     )
 
     thread1.join()
@@ -117,7 +119,7 @@ def test_graceful_stop(daemon_service: dict[str, Any]) -> None:
     port = daemon_service["port"]
     proc = daemon_service["proc"]
 
-    requests.post(f"http://localhost:{port}/v1/stop")
+    httpx.post(f"http://127.0.0.1:{port}/v1/stop", trust_env=False)
 
     # Wait for process to exit
     try:

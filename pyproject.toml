@@ -15,9 +15,8 @@ requires-python = ">=3.10"
 dependencies = [
     "fastapi",
     "uvicorn",
-    "requests",
     "pytest",
-    "tomli>=2.4.1",
+    "tomli>=2.0.0; python_version < '3.11'",
     "httpx>=0.28.1",
 ]
 keywords = ["testing", "pytest", "ai", "preloading", "hot-reload"]
@@ -98,6 +97,5 @@ dev = [
     "mypy>=1.10.0",
     "ruff>=0.15.11",
     "httpx",
-    "types-requests",
     "twine>=6.2.0",
 ]

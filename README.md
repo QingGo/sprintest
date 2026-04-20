@@ -1,64 +1,107 @@
 # Sprintest
 
 [![PyPI version](https://img.shields.io/pypi/v/sprintest.svg)](https://pypi.org/project/sprintest/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
 [English] | [简体中文](README_zh.md)
 
-Sprintest is a Client-Server (C/S) architecture test runner designed for heavy AI projects. It addresses the slow startup times of large models and datasets by keeping them preloaded in memory.
+**Sprintest** is a high-performance Client-Server (C/S) architecture test runner specifically engineered for heavy AI/ML projects. 
 
-## Core Advantages
+In projects involving large language models (LLMs), deep learning frameworks (PyTorch, TensorFlow), or massive datasets, standard test runners suffer from excruciatingly slow startup times (often 30s to several minutes) because they re-initialize the entire environment for every run. **Sprintest solves this by keeping your heavy dependencies pre-loaded in memory.**
 
-- **Intelligent Preloading**: Keep heavy dependencies (like PyTorch, Transformers, or large datasets) loaded in the daemon process, with support for automatic path search or manual path specification, reducing test startup time from minutes to seconds.
-- **Strong Hot-Reloading**: Automatically detects and nukes modified modules in the current directory, ensuring tests run against the latest code without restarting the daemon.
-- **Flexible Configuration**: Support for customizing port, target package name, and package path through environment variables, adapting to different project structures and naming conventions.
-- **Agent Friendly**: Designed with AI coding agents in mind—providing fast feedback loops, purified output (ANSI-free), and stable communication.
+---
 
-## Installation
+## 🚀 Key Highlights
+
+- **⚡ Blazing Fast Feedback**: Reduces test startup time from minutes to milliseconds by keeping heavy frameworks and models pre-loaded in a background daemon.
+- **🔄 Intelligent Hot-Reloading**: Features a "Nuke Engine" that surgically unloads only your project's modified modules, ensuring you always test against the latest code without losing the pre-loaded state.
+- **🔌 Unified Transport Layer**: Automatically chooses between **Unix Domain Sockets (UDS)** for zero-latency local communication and **TCP** for maximum compatibility.
+- **🛠️ Decoupled Architecture**: Built with a robust service layer and atomic state management, ensuring stable communication even during heavy test execution.
+- **🤖 Agent-Optimized**: Designed for AI coding agents (like Antigravity or Cursor) with clean, ANSI-free output and reliable status tracking.
+- **🎯 Configurable Strategy**: Fine-tune hot-reloading with `ignore_patterns` in your `pyproject.toml` to prevent specific heavy modules from being reloaded.
+
+---
+
+## 🏗️ Architecture
+
+Sprintest uses a decoupled architecture to ensure the daemon remains responsive even when running heavy tests.
+
+```mermaid
+graph TD
+    Client[Client CLI] -->|HTTP over UDS/TCP| Daemon[FastAPI Daemon]
+    Daemon -->|Lifespan| Preloader[Package Preloader]
+    Daemon --> Service[Test Service]
+    Service -->|Atomic Lock| Service
+    Service --> Nuke[Nuke Engine]
+    Nuke -->|Strategy| PySys[sys.modules]
+    Service --> Runner[Pytest Runner]
+    Runner -->|Redirect IO| Tests[User Tests]
+    Daemon -.-> Status[(status.json)]
+    Client -.-> Status
+```
+
+---
+
+## 📦 Installation
 
 ```bash
 pip install sprintest
 ```
 
-## Quick Start
+---
 
-1. **Run Tests**:
-   In your project root, simply run:
+## 📖 Quick Start
+
+1. **Run a test**:
+   Simply run `stest` followed by your test file. If the daemon isn't running, it will start automatically.
    ```bash
-   sprintest tests/your_test_file.py
+   stest tests/test_model_loading.py
    ```
-   
-   The system will automatically detect and start the Sprintest Daemon if it's not already running.
 
-2. **Manual Daemon Management** (optional):
-   - Check status: `sprintest status`
-   - Stop daemon: `sprintest stop`
-   - Start manually: `sprintest-daemon`
+2. **Check Daemon status**:
+   ```bash
+   stest status
+   ```
 
-## Configuration
+3. **Stop the Daemon**:
+   ```bash
+   stest stop
+   ```
 
-You can customize Sprintest using environment variables:
-- `SPRINTEST_TARGET_PKG`: Set the name of the package to be hot-reloaded (e.g., your project's main package name). This ensures changes in your source code are detected.
-- `SPRINTEST_TARGET_PKG_PATH`: Set the specific path to the target package (optional). Use this option to directly specify the path when automatic search cannot find the package.
-- `SPRINTEST_PORT`: TCP port used when Unix socket is not available (default: `8000`).
+---
 
-Example:
-```bash
-export SPRINTEST_PORT=8001
-export SPRINTEST_TARGET_PKG=my_project
-sprintest-daemon
+## ⚙️ Configuration
+
+### Environment Variables
+- `SPRINTEST_TARGET_PKG`: The name of the package you are developing. Sprintest will prioritize hot-reloading this package.
+- `SPRINTEST_FORCE_TCP`: Set to `1` to bypass Unix Sockets and force TCP communication.
+- `SPRINTEST_PORT`: Customize the TCP port (default: `8000`).
+
+### Advanced: `pyproject.toml`
+You can prevent specific modules from being "nuked" during hot-reload by adding them to the ignore list:
+
+```toml
+[tool.sprintest]
+ignore = [
+    "torch.*",
+    "transformers.*",
+    "heavy_module_to_keep"
+]
 ```
 
-Path specification example:
-```bash
-export SPRINTEST_TARGET_PKG=engram-peft
-export SPRINTEST_TARGET_PKG_PATH=/path/to/engram-peft/src
-sprintest-daemon
-```
+---
 
-## Regression Testing
+## 🧪 Testing the Runner
 
-To ensure stability, Sprintest includes integration tests. Run them using standard pytest:
+To verify the stability of the Sprintest infrastructure itself:
 
 ```bash
 uv run pytest tests
 ```
+
+---
+
+## 📄 License
+
+MIT License. See [LICENSE](LICENSE) for details.
