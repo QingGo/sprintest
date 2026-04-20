@@ -1,4 +1,6 @@
-from sprintest.daemon import clean_ansi, prepare_pytest_args
+from sprintest.runner import TestRunner, clean_ansi
+
+runner = TestRunner()
 
 
 def test_clean_ansi() -> None:
@@ -10,7 +12,7 @@ def test_clean_ansi() -> None:
 
 def test_prepare_pytest_args_no_color() -> None:
     args = ["tests/test_foo.py", "-v"]
-    prepared = prepare_pytest_args(args)
+    prepared = runner.prepare_pytest_args(args)
     assert "--color=no" in prepared
     assert "tests/test_foo.py" in prepared
     assert "-v" in prepared
@@ -20,7 +22,7 @@ def test_prepare_pytest_args_no_color() -> None:
 
 def test_prepare_pytest_args_override_color() -> None:
     args = ["--color=yes", "-k", "test_math"]
-    prepared = prepare_pytest_args(args)
+    prepared = runner.prepare_pytest_args(args)
     assert "--color=no" in prepared
     assert "--color=yes" not in prepared
     assert "-k" in prepared
@@ -29,7 +31,7 @@ def test_prepare_pytest_args_override_color() -> None:
 
 def test_prepare_pytest_args_preserves_others() -> None:
     args = ["-x", "--ff", "tests/"]
-    prepared = prepare_pytest_args(args)
+    prepared = runner.prepare_pytest_args(args)
     assert "-x" in prepared
     assert "--ff" in prepared
     assert "tests/" in prepared

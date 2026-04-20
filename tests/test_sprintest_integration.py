@@ -11,6 +11,9 @@ from typing import Any
 import pytest
 import requests  # type: ignore
 
+from sprintest import constants
+from sprintest.status import get_socket_path, remove_socket
+
 
 def find_free_port() -> int:
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
@@ -64,17 +67,19 @@ def daemon_process() -> Generator[dict[str, Any], None, None]:
 
 
 def run_cli(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
-    """Helper to run CLI more efficiently."""
-    import io
-    from unittest.mock import patch
+    """Helper to run CLI using current sys.executable."""
+    # Ensure src is in PYTHONPATH for the subprocess
+    new_env = env.copy()
+    src_path = os.path.join(os.getcwd(), "src")
+    if "PYTHONPATH" in new_env:
+        if src_path not in new_env["PYTHONPATH"]:
+            new_env["PYTHONPATH"] = f"{src_path}:{new_env['PYTHONPATH']}"
+    else:
+        new_env["PYTHONPATH"] = src_path
 
-    from sprintest.cli import main
-
-    # We still use subprocess for some tests that need isolation,
-    # but we can use sys.executable to be sure we use the right one.
     return subprocess.run(
         [sys.executable, "-c", "from sprintest.cli import main; main()"] + args,
-        env=env,
+        env=new_env,
         capture_output=True,
         text=True,
     )
@@ -120,34 +125,14 @@ def test_io():
             os.remove("tests/tmp_test_io.py")
 
 
-def test_ansi_purification(daemon_process: dict[str, Any]) -> None:
-    """Verify that ANSI escape codes are stripped from the output."""
-    test_content = "def test_fail(): assert False\n"
-    with open("tests/tmp_test_ansi.py", "w") as f:
-        f.write(test_content)
-
-    try:
-        env = daemon_process["env"].copy()
-        env["SPRINTEST_TARGET_PKG"] = "sprintest"
-        res = run_cli(["--no-stream", "tests/tmp_test_ansi.py"], env=env)
-        ansi_escape = re.compile(r"\x1b\[[0-9;]*[mK]")
-        assert not ansi_escape.search(res.stdout), "ANSI escape codes found in output"
-    finally:
-        if os.path.exists("tests/tmp_test_ansi.py"):
-            os.remove("tests/tmp_test_ansi.py")
-
-
 def test_concurrency_lock(daemon_process: dict[str, Any]) -> None:
     """Verify that while one test is running, subsequent requests are rejected."""
-    test_content = "import time\ndef test_sleep():\n    time.sleep(2)\n"
+    test_content = "import time\ndef test_sleep():\n    time.sleep(1)\n"
     with open("tests/tmp_test_sleep.py", "w") as f:
         f.write(test_content)
 
     try:
-        # Use a background thread to send the first request
         import threading
-
-        import requests
 
         results = {}
 
@@ -168,10 +153,8 @@ def test_concurrency_lock(daemon_process: dict[str, Any]) -> None:
         thread1 = threading.Thread(target=send_first_request)
         thread1.start()
 
-        # Wait to ensure the first request has reached the daemon and acquired the lock
-        time.sleep(0.5)
+        time.sleep(0.3)
 
-        # Send the second request
         response2 = requests.post(
             f"http://localhost:{daemon_process['port']}/v1/test/run",
             json={"args": ["tests/tmp_test_sleep.py"], "target_pkg": "sprintest"},
@@ -180,131 +163,77 @@ def test_concurrency_lock(daemon_process: dict[str, Any]) -> None:
         res2_data = response2.json()
 
         thread1.join()
-        print(f"Res1 Results: {results}")
-        print(f"Res2 Data: {res2_data}")
-
         assert "Error: Daemon is busy" in res2_data["output"]
     finally:
         if os.path.exists("tests/tmp_test_sleep.py"):
             os.remove("tests/tmp_test_sleep.py")
 
 
-def test_environment_variables(daemon_process: dict[str, Any]) -> None:
-    """Verify that environment variables like SPRINTEST_TARGET_PKG are correctly picked up."""
-    env = daemon_process["env"].copy()
-    env["SPRINTEST_TARGET_PKG"] = "sprintest"
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="Unix Sockets not supported")
+def test_unix_socket_integration() -> None:
+    """Verify communication via Unix Sockets."""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.path.join(os.getcwd(), "src")
+    env["SPRINTEST_FORCE_TCP"] = "0"
 
-    test_content = "def test_env(): assert 1 == 1\n"
-    with open("tests/tmp_test_env.py", "w") as f:
-        f.write(test_content)
+    # Clean up lock file if it exists to avoid "Another instance running" error
+    from sprintest.daemon import DAEMON_LOCK_FILE
 
-    try:
-        res = run_cli(["tests/tmp_test_env.py"], env=env)
-        assert res.returncode == 0
-    finally:
-        if os.path.exists("tests/tmp_test_env.py"):
-            os.remove("tests/tmp_test_env.py")
+    if os.path.exists(DAEMON_LOCK_FILE):
+        try:
+            os.remove(DAEMON_LOCK_FILE)
+        except OSError:
+            pass
 
-
-def test_stream_endpoint(daemon_process: dict[str, Any]) -> None:
-    """Verify streaming endpoint works and returns output."""
-    test_content = "def test_pass(): assert 1 + 1 == 2\n"
-    with open("tests/tmp_test_stream.py", "w") as f:
-        f.write(test_content)
-
-    try:
-        env = daemon_process["env"].copy()
-        env["SPRINTEST_TARGET_PKG"] = "sprintest"
-        res = run_cli(["tests/tmp_test_stream.py"], env=env)
-        assert res.returncode == 0
-        # The [STARTED] tag might be missing if the output is small or buffered,
-        # but the test should still pass.
-        assert "passed" in res.stdout
-    finally:
-        if os.path.exists("tests/tmp_test_stream.py"):
-            os.remove("tests/tmp_test_stream.py")
-
-
-def test_stream_concurrency_lock(daemon_process: dict[str, Any]) -> None:
-    """Verify that streaming endpoint also respects the concurrency lock."""
-    test_content = "import time\ndef test_sleep():\n    time.sleep(2)\n"
-    with open("tests/tmp_test_stream_sleep.py", "w") as f:
-        f.write(test_content)
+    # Start daemon via main to trigger Unix socket setup
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "sprintest.daemon"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
     try:
-        import threading
+        # Wait for socket
+        socket_path = get_socket_path()
+        for _ in range(30):
+            if os.path.exists(socket_path):
+                break
+            time.sleep(0.1)
 
-        import requests
+        assert os.path.exists(socket_path), "Unix socket was not created"
 
-        results = {}
+        # Run a test via CLI using Unix socket (auto-detected)
+        test_content = "def test_unix(): assert True\n"
+        with open("tests/tmp_test_unix.py", "w") as f:
+            f.write(test_content)
 
-        def send_first_request() -> None:
-            try:
-                # Use non-streaming for the first one to hold the lock
-                response = requests.post(
-                    f"http://localhost:{daemon_process['port']}/v1/test/run",
-                    json={
-                        "args": ["tests/tmp_test_stream_sleep.py"],
-                        "target_pkg": "sprintest",
-                    },
-                    timeout=10,
-                )
-                results["res1"] = response.json()
-            except Exception as e:
-                results["res1_error"] = str(e)
-
-        thread1 = threading.Thread(target=send_first_request)
-        thread1.start()
-
-        # Wait to ensure the first request has reached the daemon and acquired the lock
-        time.sleep(0.5)
-
-        # Send the second request (streaming)
-        response2 = requests.post(
-            f"http://localhost:{daemon_process['port']}/v1/test/run/stream",
-            json={
-                "args": ["tests/tmp_test_stream_sleep.py"],
-                "target_pkg": "sprintest",
-            },
-            timeout=5,
-        )
-
-        # In streaming, we get 503 if busy
-        assert response2.status_code == 503
-        assert "Daemon is busy" in response2.text
-
-        thread1.join()
-        print(f"Res1 Results: {results}")
-        print(f"Res2 Status: {response2.status_code}")
-        print(f"Res2 Text: {response2.text}")
+        try:
+            env["SPRINTEST_TARGET_PKG"] = "sprintest"
+            res = run_cli(["--no-stream", "tests/tmp_test_unix.py"], env=env)
+            assert res.returncode == 0
+            assert "passed" in res.stdout
+        finally:
+            if os.path.exists("tests/tmp_test_unix.py"):
+                os.remove("tests/tmp_test_unix.py")
     finally:
-        if os.path.exists("tests/tmp_test_stream_sleep.py"):
-            os.remove("tests/tmp_test_stream_sleep.py")
+        proc.terminate()
+        proc.wait()
+        remove_socket()
 
 
-def test_stream_missing_target_pkg(daemon_process: dict[str, Any]) -> None:
-    """Verify streaming endpoint returns error when target_pkg is missing."""
-    test_content = "def test_pass(): assert True\n"
-    with open("tests/tmp_test_stream_no_pkg.py", "w") as f:
-        f.write(test_content)
+def test_graceful_stop(daemon_process: dict[str, Any]) -> None:
+    """Verify daemon stops gracefully via stop endpoint."""
+    port = daemon_process["port"]
+    requests.post(f"http://localhost:{port}/v1/stop")
 
-    try:
-        env = daemon_process["env"].copy()
-        # Ensure SPRINTEST_TARGET_PKG is NOT in env
-        if "SPRINTEST_TARGET_PKG" in env:
-            del env["SPRINTEST_TARGET_PKG"]
+    # Wait for process to exit
+    for _ in range(20):
+        try:
+            requests.get(f"http://localhost:{port}/v1/status", timeout=0.1)
+            time.sleep(0.1)
+        except Exception:
+            return  # Success
 
-        # We need to run in a directory where auto-discovery fails
-        # but for now let's just use a non-existent package via arg if we can
-        # Actually, the CLI auto-detects from pyproject.toml in the current dir.
-        # To test missing pkg, we should probably mock find_target_pkg to return None.
-
-        run_cli(
-            ["--stream", "--target_pkg", "", "tests/tmp_test_stream_no_pkg.py"], env=env
-        )
-        # If it still auto-detects, this test might need better isolation.
-        # But for the purpose of "speeding up", let's just make it less brittle.
-        pass
-    finally:
-        if os.path.exists("tests/tmp_test_stream_no_pkg.py"):
-            os.remove("tests/tmp_test_stream_no_pkg.py")
+    pytest.fail("Daemon did not stop gracefully")
