@@ -94,10 +94,10 @@ def test_concurrency_lock(daemon_service: dict[str, Any], tmp_path: Any) -> None
         json={"args": [str(test_file)], "target_pkg": "sprintest"},
         timeout=5,
     )
-    res2_data = response2.json()
 
     thread1.join()
-    assert "Error: Daemon is busy" in res2_data["output"]
+    assert response2.status_code == 429
+    assert "Another test is already running" in response2.json()["detail"]
 
 
 @pytest.mark.parametrize("daemon_config", ["unix"], indirect=True)

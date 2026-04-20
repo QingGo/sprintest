@@ -5,12 +5,17 @@ import os
 import re
 import shutil
 import sys
-import threading
 from contextlib import redirect_stderr, redirect_stdout
+from typing import Any
 
 import pytest
 
 from sprintest.logger import logger
+
+try:
+    import tomllib  # type: ignore
+except ImportError:
+    import tomli as tomllib  # type: ignore
 
 
 def clean_ansi(text: str) -> str:
@@ -19,72 +24,66 @@ def clean_ansi(text: str) -> str:
     return ansi_escape.sub("", text)
 
 
-class TestRunner:
-    __test__ = False
+class NukeStrategy:
+    """Strategy for unloading modules during hot-reload."""
 
     def __init__(self) -> None:
-        self.first_test_run = True
-        self.first_test_run_lock = threading.Lock()
+        self.root = os.path.abspath(os.getcwd())
+        self.venv_dir = os.path.join(self.root, ".venv")
+        self.ignore_patterns = self._load_ignore_patterns()
 
-    def prepare_pytest_args(
-        self, args: list[str], enable_color: bool = False
-    ) -> list[str]:
-        """Force --color=no (or yes if enable_color=True) and add common warning filters to pytest arguments."""
-        pytest_args: list[str] = args.copy()
+    def _load_ignore_patterns(self) -> list[str]:
+        """Load ignore patterns from pyproject.toml."""
+        patterns = ["sprintest", "sprintest.*"]  # Default ignores
+        path = os.path.join(self.root, "pyproject.toml")
+        if os.path.exists(path):
+            try:
+                with open(path, "rb") as f:
+                    data = tomllib.load(f)
+                    user_patterns = (
+                        data.get("tool", {}).get("sprintest", {}).get("ignore", [])
+                    )
+                    if isinstance(user_patterns, list):
+                        patterns.extend(user_patterns)
+            except Exception as e:
+                logger.warning(f"Failed to load ignore patterns from {path}: {e}")
+        return patterns
 
-        color_found = False
-        for i, arg in enumerate(pytest_args):
-            if arg.startswith("--color="):
-                pytest_args[i] = "--color=yes" if enable_color else "--color=no"
-                color_found = True
-                break
-        if not color_found:
-            pytest_args.append("--color=yes" if enable_color else "--color=no")
+    def should_nuke(self, name: str, mod: Any, target_pkg: str | None) -> bool:
+        """Determine if a module should be nuked."""
+        # Check ignore patterns
+        for pattern in self.ignore_patterns:
+            if re.match(pattern.replace(".", "\\.").replace("*", ".*"), name):
+                return False
 
-        pytest_args.extend(["-W", "ignore::pytest.PytestAssertRewriteWarning"])
-        return pytest_args
+        # Target package or tests should be nuked
+        if (
+            target_pkg and (name == target_pkg or name.startswith(target_pkg + "."))
+        ) or (name == "tests" or name.startswith("tests.")):
+            return True
 
-    def nuke_modules(self, target_pkg: str | None) -> int:
+        # Modules within project root (but not venv) should be nuked
+        file_path = getattr(mod, "__file__", "")
+        if file_path:
+            abs_file_path = os.path.abspath(file_path)
+            if abs_file_path.startswith(self.root) and not abs_file_path.startswith(
+                self.venv_dir
+            ):
+                return True
+
+        # Test files or modules containing 'test_'
+        if file_path and ("test_" in file_path or "test_nuke" == name):
+            return True
+
+        return False
+
+    def nuke(self, target_pkg: str | None) -> int:
         """Identify and remove modules to allow hot-reloading."""
-        root = os.path.abspath(os.getcwd())
-        venv_dir = os.path.join(root, ".venv")
-
         modules_to_delete: list[str] = []
 
         for name, mod in list(sys.modules.items()):
-            if name == "sprintest" or name.startswith("sprintest."):
-                continue
-
-            file_path = getattr(mod, "__file__", "")
-            if file_path:
-                abs_file_path = os.path.abspath(file_path)
-                if abs_file_path.startswith(root) and not abs_file_path.startswith(
-                    venv_dir
-                ):
-                    modules_to_delete.append(name)
-                    continue
-
-            if (
-                target_pkg and (name == target_pkg or name.startswith(target_pkg + "."))
-            ) or (name == "tests" or name.startswith("tests.")):
-                if name not in modules_to_delete:
-                    modules_to_delete.append(name)
-
-        for name in list(sys.modules.keys()):
-            if name == "sprintest" or name.startswith("sprintest."):
-                continue
-
-            if (target_pkg and name.startswith(target_pkg)) or name.startswith("tests"):
-                if name not in modules_to_delete:
-                    modules_to_delete.append(name)
-                    continue
-
-            m = sys.modules.get(name)
-            if m is not None:
-                file_path = getattr(m, "__file__", "")
-                if file_path and ("test_" in file_path or "test_nuke" == name):
-                    if name not in modules_to_delete:
-                        modules_to_delete.append(name)
+            if self.should_nuke(name, mod, target_pkg):
+                modules_to_delete.append(name)
 
         modules_to_delete = list(set(modules_to_delete))
 
@@ -99,29 +98,50 @@ class TestRunner:
 
         importlib.invalidate_caches()
 
+        # Cleanup __pycache__
         if target_pkg:
-            pycache_dirs = glob.glob(f"{target_pkg}/__pycache__")
-            for d in pycache_dirs:
-                shutil.rmtree(d, ignore_errors=True)
-            pycache_dirs = glob.glob("tests/__pycache__")
+            pycache_dirs = glob.glob(f"{target_pkg}/**/__pycache__", recursive=True)
             for d in pycache_dirs:
                 shutil.rmtree(d, ignore_errors=True)
 
+        pycache_dirs = glob.glob("tests/**/__pycache__", recursive=True)
+        for d in pycache_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+
         return len(modules_to_delete)
+
+    def nuke_tests(self) -> None:
+        """Specifically nuke test modules to ensure fresh collection."""
+        self.nuke(None)
+
+
+class TestRunner:
+    """Core engine for running pytest within the daemon process."""
+
+    __test__ = False
+
+    def prepare_pytest_args(
+        self, args: list[str], enable_color: bool = False
+    ) -> list[str]:
+        """Force color and add common warning filters."""
+        pytest_args: list[str] = args.copy()
+
+        color_found = False
+        for i, arg in enumerate(pytest_args):
+            if arg.startswith("--color="):
+                pytest_args[i] = "--color=yes" if enable_color else "--color=no"
+                color_found = True
+                break
+        if not color_found:
+            pytest_args.append("--color=yes" if enable_color else "--color=no")
+
+        pytest_args.extend(["-W", "ignore::pytest.PytestAssertRewriteWarning"])
+        return pytest_args
 
     def run_tests(
         self, args: list[str], target_pkg: str | None, enable_color: bool = False
     ) -> tuple[int, str, int]:
         """Run tests and return (exit_code, output, nuked_count)."""
-        with self.first_test_run_lock:
-            if self.first_test_run:
-                nuked_count = 0
-                self.first_test_run = False
-                logger.info("First test run, skipping module nuke.")
-            else:
-                nuked_count = self.nuke_modules(target_pkg)
-                logger.info(f"Hot-reloading: nuked {nuked_count} modules.")
-
         pytest_args = self.prepare_pytest_args(args, enable_color=enable_color)
         logger.debug(f"Running pytest with args: {pytest_args}")
 
@@ -137,7 +157,4 @@ class TestRunner:
             output = f"Error: {e}\n"
             exit_code = 1
 
-        # Post-run cleanup to ensure fresh state for next time
-        self.nuke_modules(target_pkg)
-
-        return int(exit_code), clean_ansi(output), nuked_count
+        return int(exit_code), clean_ansi(output), 0

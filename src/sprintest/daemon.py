@@ -1,4 +1,3 @@
-import asyncio
 import importlib
 import os
 import signal
@@ -20,7 +19,7 @@ from pydantic import BaseModel
 from sprintest import constants
 from sprintest.discovery import discover_package_path
 from sprintest.logger import setup_logger
-from sprintest.runner import TestRunner
+from sprintest.service import TestService
 from sprintest.status import (
     ensure_sprintest_dir,
     get_socket_path,
@@ -44,6 +43,12 @@ class TestRunResponse(BaseModel):
     nuked_modules_count: int
 
 
+# Global state
+test_service = TestService()
+DAEMON_LOCK_FILE = os.path.join(tempfile.gettempdir(), "sprintest_global.lock")
+shutdown_event = threading.Event()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan context manager for FastAPI."""
@@ -52,12 +57,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(lifespan=lifespan)
-
-# Global state
-test_runner = TestRunner()
-test_lock = threading.Lock()
-DAEMON_LOCK_FILE = os.path.join(tempfile.gettempdir(), "sprintest_global.lock")
-shutdown_event = threading.Event()
 
 
 def acquire_daemon_lock() -> bool:
@@ -85,72 +84,35 @@ def release_daemon_lock() -> None:
         pass
 
 
-@app.post("/v1/test/run/stream")
-async def run_test_stream(request: TestRunRequest) -> StreamingResponse:
-    if not test_lock.acquire(blocking=False):
-        logger.warning("Rejecting streaming test request: Daemon is busy.")
-        raise HTTPException(status_code=503, detail="Daemon is busy.")
-
-    try:
-        loop = asyncio.get_event_loop()
-        target_pkg = request.target_pkg or os.environ.get(constants.ENV_TARGET_PKG)
-        if not target_pkg:
-            logger.error("Rejecting streaming test request: target_pkg missing.")
-            return StreamingResponse(
-                iter([b"Error: target_pkg missing.\n", b"[DONE] exit_code=1\n"]),
-                media_type="text/plain",
-            )
-
-        logger.info(f"Starting streaming test run for package: {target_pkg}")
-        exit_code, output, nuked_count = await loop.run_in_executor(
-            None, test_runner.run_tests, request.args, target_pkg, True
-        )
-
-        lines = [f"[STARTED] nuked {nuked_count} modules\n"]
-        lines.extend(output.splitlines())
-        lines.append(f"\n[DONE] exit_code={exit_code}\n")
-
-        return StreamingResponse(
-            iter([(line + "\n").encode() for line in lines]),
-            media_type="text/plain",
-        )
-    finally:
-        try:
-            test_lock.release()
-        except RuntimeError:
-            pass
-
-
 @app.post("/v1/test/run")
 async def run_test(request: TestRunRequest) -> TestRunResponse:
-    if not test_lock.acquire(blocking=False):
-        logger.warning("Rejecting test request: Daemon is busy.")
-        return TestRunResponse(
-            exit_code=1, output="Error: Daemon is busy.", nuked_modules_count=0
-        )
+    """Execute a test run and return results."""
+    result = await test_service.run_tests(request.args, request.target_pkg)
 
-    try:
-        target_pkg = request.target_pkg or os.environ.get(constants.ENV_TARGET_PKG)
-        if not target_pkg:
-            logger.error("Rejecting test request: target_pkg missing.")
-            return TestRunResponse(
-                exit_code=1, output="Error: target_pkg missing.", nuked_modules_count=0
-            )
+    if result.get("error") == "busy":
+        raise HTTPException(status_code=429, detail="Another test is already running")
 
-        logger.info(f"Starting test run for package: {target_pkg}")
-        loop = asyncio.get_event_loop()
-        exit_code, output, nuked_count = await loop.run_in_executor(
-            None, test_runner.run_tests, request.args, target_pkg
-        )
+    return TestRunResponse(
+        exit_code=result["exit_code"],
+        output=result["output"],
+        nuked_modules_count=result["nuked_modules_count"],
+    )
 
-        return TestRunResponse(
-            exit_code=exit_code, output=output, nuked_modules_count=nuked_count
-        )
-    finally:
-        try:
-            test_lock.release()
-        except RuntimeError:
-            pass
+
+@app.post("/v1/test/run/stream")
+async def run_test_stream(request: TestRunRequest) -> StreamingResponse:
+    """Execute a test run and stream results back to the client."""
+    result = await test_service.run_tests(request.args, request.target_pkg)
+
+    if result.get("error") == "busy":
+        raise HTTPException(status_code=429, detail="Another test is already running")
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        yield f"[STARTED] nuked {result['nuked_modules_count']} modules\n"
+        yield result["output"]
+        yield f"\n[DONE] exit_code={result['exit_code']}\n"
+
+    return StreamingResponse(event_generator(), media_type="text/plain")
 
 
 @app.get("/v1/status")
@@ -220,6 +182,7 @@ def setup_servers() -> tuple[str | None, int | None]:
                 "socket_path": socket_path,
                 "version": constants.VERSION,
                 "type": "unix",
+                "start_time": time.time(),
             }
         )
         logger.info(f"Daemon configured with Unix socket: {socket_path}")
@@ -232,6 +195,7 @@ def setup_servers() -> tuple[str | None, int | None]:
                 "port": port,
                 "version": constants.VERSION,
                 "type": "tcp",
+                "start_time": time.time(),
             }
         )
         logger.info(f"Daemon configured with TCP port: {port}")

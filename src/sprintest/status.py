@@ -28,10 +28,18 @@ def ensure_sprintest_dir() -> None:
 
 
 def write_status(status: dict[str, Any]) -> None:
-    """写入状态文件"""
+    """写入状态文件（原子操作）"""
     ensure_sprintest_dir()
-    with open(get_status_path(), "w") as f:
-        json.dump(status, f, indent=2)
+    path = get_status_path()
+    tmp_path = f"{path}.tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(status, f, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
 
 
 def read_status() -> dict[str, Any] | None:

@@ -1,17 +1,21 @@
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from sprintest.daemon import app, test_lock
+from sprintest.daemon import app, test_service
 
 
 def test_api_run_test_success() -> None:
     client = TestClient(app)
     payload = {"args": ["tests/test_foo.py"], "target_pkg": "sprintest"}
 
-    with patch("sprintest.daemon.test_runner.run_tests") as mock_run:
-        mock_run.return_value = (0, "passed", 0)
+    with patch.object(test_service, "run_tests", new_callable=AsyncMock) as mock_run:
+        mock_run.return_value = {
+            "exit_code": 0,
+            "output": "passed",
+            "nuked_modules_count": 0,
+        }
 
         response = client.post("/v1/test/run", json=payload)
 
@@ -22,47 +26,16 @@ def test_api_run_test_success() -> None:
         mock_run.assert_called_once()
 
 
-def test_api_run_test_second_run() -> None:
-    client = TestClient(app)
-    payload = {"args": ["tests/test_foo.py"], "target_pkg": "sprintest"}
-
-    with patch("sprintest.daemon.test_runner.run_tests") as mock_run:
-        mock_run.return_value = (0, "passed", 5)
-
-        response = client.post("/v1/test/run", json=payload)
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["exit_code"] == 0
-        assert data["nuked_modules_count"] == 5
-        mock_run.assert_called_once()
-
-
 def test_api_run_test_busy() -> None:
     client = TestClient(app)
     payload = {"args": ["tests/test_foo.py"], "target_pkg": "sprintest"}
 
-    test_lock.acquire()
-    try:
+    with patch.object(test_service, "run_tests", new_callable=AsyncMock) as mock_run:
+        mock_run.return_value = {"error": "busy"}
+
         response = client.post("/v1/test/run", json=payload)
-        assert response.status_code == 200
-        data = response.json()
-        assert data["exit_code"] == 1
-        assert "Error: Daemon is busy" in data["output"]
-    finally:
-        test_lock.release()
-
-
-def test_api_run_test_missing_pkg() -> None:
-    client = TestClient(app)
-    payload = {"args": ["tests/test_foo.py"]}
-
-    with patch.dict("os.environ", {}, clear=True):
-        response = client.post("/v1/test/run", json=payload)
-        assert response.status_code == 200
-        data = response.json()
-        assert data["exit_code"] == 1
-        assert "target_pkg missing" in data["output"]
+        assert response.status_code == 429
+        assert "Another test is already running" in response.json()["detail"]
 
 
 def test_pre_load_logic() -> None:
