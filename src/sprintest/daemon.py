@@ -18,18 +18,22 @@ from pydantic import BaseModel
 from sprintest import constants
 from sprintest.discovery import discover_package_path
 from sprintest.logger import setup_logger
+from sprintest.paths import ensure_sprintest_dir, get_socket_path, get_sprintest_dir
 from sprintest.service import TestService
 from sprintest.status import (
-    ensure_sprintest_dir,
-    get_socket_path,
-    get_sprintest_dir,
     remove_socket,
     remove_status,
     write_status,
 )
 
-# Setup daemon logger (with file output)
-DAEMON_LOCK_FILE = os.path.join(get_sprintest_dir(), "daemon.lock")
+
+def get_lock_path() -> str:
+    """Get the current daemon lock file path."""
+    return os.environ.get(
+        "SPRINTEST_LOCK_FILE", os.path.join(get_sprintest_dir(), "daemon.lock")
+    )
+
+
 logger = setup_logger("sprintest.daemon", is_daemon=True)
 
 
@@ -59,27 +63,69 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(lifespan=lifespan)
 
 
+_lock_internal = threading.Lock()
+
+
 def acquire_daemon_lock() -> bool:
-    if os.path.exists(DAEMON_LOCK_FILE):
+    with _lock_internal:
+        ensure_sprintest_dir()
+        lock_path = get_lock_path()
+
+        # Try to create the file atomically
         try:
-            with open(DAEMON_LOCK_FILE) as f:
-                pid = int(f.read().strip())
-            if psutil.pid_exists(pid):
+            # Open with O_EXCL to ensure atomic creation
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, str(os.getpid()).encode())
+            finally:
+                os.close(fd)
+            return True
+        except FileExistsError:
+            # File exists, check if it's stale
+            try:
+                # Give the other process a tiny bit of time to write its PID
+                # if it just created the file
+                content = ""
+                for _ in range(3):
+                    with open(lock_path) as f:
+                        content = f.read().strip()
+                    if content:
+                        break
+                    time.sleep(0.01)
+
+                if not content:
+                    # Still empty? Probably stale or crashed during creation
+                    try:
+                        os.remove(lock_path)
+                    except OSError:
+                        pass
+                    return acquire_daemon_lock()
+
+                pid = int(content)
+                if not psutil.pid_exists(pid):
+                    # Stale lock, remove and retry
+                    try:
+                        os.remove(lock_path)
+                    except OSError:
+                        pass
+                    return acquire_daemon_lock()
                 return False
+            except (OSError, ValueError):
+                # Error reading or corrupted content, try to remove and retry
+                try:
+                    os.remove(lock_path)
+                except OSError:
+                    pass
+                return acquire_daemon_lock()
         except Exception:
-            pass
-    try:
-        with open(DAEMON_LOCK_FILE, "w") as f:
-            f.write(str(os.getpid()))
-        return True
-    except Exception:
-        return False
+            return False
 
 
 def release_daemon_lock() -> None:
+    lock_path = get_lock_path()
     try:
-        if os.path.exists(DAEMON_LOCK_FILE):
-            os.remove(DAEMON_LOCK_FILE)
+        if os.path.exists(lock_path):
+            os.remove(lock_path)
     except Exception:
         pass
 
@@ -168,11 +214,11 @@ def pre_load_package() -> None:
 
 def setup_servers() -> tuple[str | None, int | None]:
     """Determine server configuration and write status."""
+    ensure_sprintest_dir()
     use_unix = (
         hasattr(socket, "AF_UNIX") and os.environ.get(constants.ENV_FORCE_TCP) != "1"
     )
     if use_unix:
-        ensure_sprintest_dir()
         socket_path = get_socket_path()
         remove_socket()
 
@@ -204,8 +250,12 @@ def setup_servers() -> tuple[str | None, int | None]:
 
 def run() -> None:
     # Set up signal handlers
-    signal.signal(signal.SIGTERM, handle_exit)
-    signal.signal(signal.SIGINT, handle_exit)
+    try:
+        signal.signal(signal.SIGTERM, handle_exit)
+        signal.signal(signal.SIGINT, handle_exit)
+    except ValueError:
+        # Signals only work in the main thread; ignore in other environments (like some tests)
+        pass
 
     if not acquire_daemon_lock():
         logger.error(

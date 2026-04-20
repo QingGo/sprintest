@@ -10,6 +10,7 @@ import httpx
 
 from sprintest import constants
 from sprintest.logger import logger
+from sprintest.paths import ensure_sprintest_dir
 from sprintest.status import read_status
 
 
@@ -41,9 +42,13 @@ class DaemonClient:
 
     def _check_health(self) -> bool:
         """Check if the daemon is responding to health checks."""
+        status = read_status()
+        if not status:
+            return False
+
         try:
-            with self._get_client() as client:
-                resp = client.get("/v1/status", timeout=0.1)
+            with self._create_client(status) as client:
+                resp = client.get("/v1/status", timeout=0.5)
                 return resp.status_code == 200
         except Exception:
             return False
@@ -55,10 +60,14 @@ class DaemonClient:
             return True
 
         logger.info("Starting Sprintest Daemon...")
+        ensure_sprintest_dir()
+        log_path = os.path.join(constants.SPRINTEST_DIR, constants.LOG_FILE)
+        log_file = open(log_path, "a")
+
         subprocess.Popen(
             [sys.executable, "-m", "sprintest.daemon"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
             start_new_session=True,
         )
 

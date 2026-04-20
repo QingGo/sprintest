@@ -1,4 +1,12 @@
 import os
+import tempfile
+
+# Isolate the test session from the real project's .sprintest directory
+# This is crucial when running "self-hosting" tests (sprintest testing itself)
+if "SPRINTEST_DIR" not in os.environ:
+    _temp_dir = tempfile.TemporaryDirectory(prefix="sprintest_test_")
+    os.environ["SPRINTEST_DIR"] = _temp_dir.name
+    # Note: the directory will be cleaned up when the process exits
 import socket
 import subprocess
 import sys
@@ -11,7 +19,8 @@ import httpx
 import pytest
 
 from sprintest import constants
-from sprintest.status import get_socket_path, remove_socket
+from sprintest.paths import get_socket_path, get_sprintest_dir
+from sprintest.status import remove_socket
 
 
 def wait_for_condition(
@@ -77,6 +86,11 @@ def daemon_service(
         env["SPRINTEST_FORCE_TCP"] = "1"
         socket_path = None
 
+    # Use a unique lock file for tests to avoid contention
+    env["SPRINTEST_LOCK_FILE"] = os.path.join(
+        get_sprintest_dir(), f"daemon_{port or 'unix'}.lock"
+    )
+
     # Start the daemon
     proc = subprocess.Popen(
         [sys.executable, "-m", "sprintest.daemon"],
@@ -92,14 +106,14 @@ def daemon_service(
             assert socket_path is not None
             wait_for_condition(
                 lambda: os.path.exists(socket_path),
-                timeout=5.0,
+                timeout=10.0,
                 error_msg=f"Unix socket {socket_path} was not created",
             )
         else:
             url = f"http://127.0.0.1:{port}/v1/status"
             wait_for_condition(
                 lambda: httpx.get(url, timeout=0.1, trust_env=False).status_code == 200,
-                timeout=5.0,
+                timeout=10.0,
                 error_msg=f"Daemon failed to start on port {port}",
             )
 

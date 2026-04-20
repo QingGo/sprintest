@@ -4,39 +4,18 @@ from typing import Any
 
 import psutil
 
-from sprintest import constants
+from sprintest.logger import logger
+from sprintest.paths import ensure_sprintest_dir, get_socket_path, get_status_path
 
 
-def get_sprintest_dir() -> str:
-    """获取 sprintest 目录路径"""
-    return os.path.abspath(constants.SPRINTEST_DIR)
-
-
-def get_socket_path() -> str:
-    """获取 Unix socket 文件路径"""
-    sprintest_dir = get_sprintest_dir()
-    return os.path.join(sprintest_dir, constants.SOCKET_NAME)
-
-
-def get_status_path() -> str:
-    """获取状态文件路径"""
-    return os.path.join(get_sprintest_dir(), constants.STATUS_FILE)
-
-
-def ensure_sprintest_dir() -> None:
-    """确保 .sprintest 目录存在"""
-    sprintest_dir = get_sprintest_dir()
-    os.makedirs(sprintest_dir, exist_ok=True)
-
-
-def write_status(status: dict[str, Any]) -> None:
-    """写入状态文件（原子操作）"""
+def write_status(data: dict[str, Any]) -> None:
+    """写入状态文件"""
     ensure_sprintest_dir()
     path = get_status_path()
-    tmp_path = f"{path}.tmp"
+    tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "w") as f:
-            json.dump(status, f, indent=2)
+            json.dump(data, f)
         os.replace(tmp_path, path)
     except Exception:
         if os.path.exists(tmp_path):
@@ -58,6 +37,7 @@ def read_status() -> dict[str, Any] | None:
             # 验证进程存活
             pid = data.get("pid")
             if pid and not psutil.pid_exists(pid):
+                logger.warning(f"Removing stale status file (PID {pid} is not running)")
                 remove_status()
                 return None
 
@@ -75,6 +55,9 @@ def remove_status() -> None:
 
 def remove_socket() -> None:
     """删除 Unix socket 文件"""
-    socket_path = get_socket_path()
-    if os.path.exists(socket_path):
-        os.remove(socket_path)
+    path = get_socket_path()
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass

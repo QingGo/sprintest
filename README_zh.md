@@ -73,10 +73,13 @@ pip install sprintest
 
 ## ⚙️ 配置说明
 
-### 环境变量
+### 环境变量与隔离
 - `SPRINTEST_TARGET_PKG`: 你正在开发的包名。Sprintest 会优先对该包进行热重载。
 - `SPRINTEST_FORCE_TCP`: 设置为 `1` 时，强制使用 TCP 替代 Unix Sockets 通信。
 - `SPRINTEST_PORT`: 自定义 TCP 端口（默认为 `8000`）。
+- `SPRINTEST_DIR`: 覆盖默认的 `.sprintest` 目录（适用于多项目隔离或 CI 环境）。
+- `SPRINTEST_LOCK_FILE`: 覆盖守护进程锁文件路径。
+- `SPRINTEST_LOG_LEVEL`: 设置日志级别 (DEBUG, INFO, WARNING, ERROR)。
 
 ### 进阶配置：`pyproject.toml`
 你可以通过配置忽略列表，防止特定模块在热重载时被清理：
@@ -94,10 +97,15 @@ ignore = [
 
 ## 🧪 开发与测试
 
-如果你想验证 Sprintest 自身的基础设施稳定性：
-
+### 标准单元测试
 ```bash
 uv run pytest tests
+```
+
+### 自举测试 (Bootstrap)
+Sprintest 具备强大的自举能力，可以通过自身的守护进程运行自身的测试套件以验证稳定性：
+```bash
+stest tests
 ```
 
 ---

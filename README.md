@@ -73,10 +73,13 @@ pip install sprintest
 
 ## ⚙️ Configuration
 
-### Environment Variables
+### Environment Variables & Isolation
 - `SPRINTEST_TARGET_PKG`: The name of the package you are developing. Sprintest will prioritize hot-reloading this package.
 - `SPRINTEST_FORCE_TCP`: Set to `1` to bypass Unix Sockets and force TCP communication.
 - `SPRINTEST_PORT`: Customize the TCP port (default: `8000`).
+- `SPRINTEST_DIR`: Override the default `.sprintest` directory (useful for multi-project isolation or CI environments).
+- `SPRINTEST_LOCK_FILE`: Override the daemon lock file path.
+- `SPRINTEST_LOG_LEVEL`: Set log level (DEBUG, INFO, WARNING, ERROR).
 
 ### Advanced: `pyproject.toml`
 You can prevent specific modules from being "nuked" during hot-reload by adding them to the ignore list:
@@ -94,10 +97,15 @@ ignore = [
 
 ## 🧪 Testing the Runner
 
-To verify the stability of the Sprintest infrastructure itself:
-
+### Standard Unit Tests
 ```bash
 uv run pytest tests
+```
+
+### Self-Hosting (Bootstrap) Test
+Sprintest can reliably run its own test suite through its own daemon to verify infrastructure stability:
+```bash
+stest tests
 ```
 
 ---

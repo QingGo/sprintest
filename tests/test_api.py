@@ -1,3 +1,5 @@
+import os
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -38,7 +40,7 @@ def test_api_run_test_busy() -> None:
         assert "Another test is already running" in response.json()["detail"]
 
 
-def test_pre_load_logic() -> None:
+def test_pre_load_logic(tmp_path: Any) -> None:
     """Test the pre-load logic in run() function"""
     from unittest.mock import patch
 
@@ -50,6 +52,7 @@ def test_pre_load_logic() -> None:
                 "SPRINTEST_PORT": "8000",
                 "SPRINTEST_FORCE_TCP": "1",
                 "SPRINTEST_SKIP_UVICORN": "1",
+                "SPRINTEST_LOCK_FILE": os.path.join(tmp_path, "test_daemon.lock"),
             },
         ),
         patch("importlib.import_module") as mock_import,

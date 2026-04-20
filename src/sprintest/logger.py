@@ -4,7 +4,7 @@ import sys
 from logging.handlers import RotatingFileHandler
 
 from sprintest import constants
-from sprintest.status import ensure_sprintest_dir
+from sprintest.paths import ensure_sprintest_dir
 
 
 def setup_logger(name: str = "sprintest", is_daemon: bool = False) -> logging.Logger:
