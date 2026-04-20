@@ -269,8 +269,27 @@ def run() -> None:
         if os.environ.get(constants.ENV_SKIP_UVICORN) != "1":
             if socket_path:
                 logger.info(f"Starting Uvicorn on Unix socket: {socket_path}")
+                # Pre-bind the socket ourselves so uvicorn receives an already-bound
+                # file descriptor via `fd=` instead of a path via `uds=`. This
+                # bypasses uvicorn's internal os.chmod() call (only triggered when
+                # `uds=` is used) which fails with EINVAL on some Linux filesystems
+                # (e.g., overlayfs inside Docker containers).
+                #
+                # We intentionally skip chmod here. Default socket permissions
+                # (0o755 with typical umask) allow only the owner to connect,
+                # which is correct for a local dev tool where the CLI and daemon
+                # always run as the same user. The 0o660 that uvicorn sets is
+                # designed for production WSGI setups (e.g., nginx connecting via
+                # a group) — that model does not apply to sprintest.
+                uds_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                uds_sock.bind(socket_path)
+                logger.debug(
+                    f"Unix socket bound at {socket_path} (fd={uds_sock.fileno()})"
+                )
                 uvicorn.run(
-                    "sprintest.daemon:app", uds=socket_path, log_level="warning"
+                    "sprintest.daemon:app",
+                    fd=uds_sock.fileno(),
+                    log_level="warning",
                 )
             else:
                 p = port or int(
