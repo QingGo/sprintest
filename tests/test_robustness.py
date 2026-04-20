@@ -139,7 +139,7 @@ def test_concurrency_lock_atomicity(
     results: list[bool] = []
 
     def attempt_lock() -> None:
-        results.append(acquire_daemon_lock())
+        results.append(acquire_daemon_lock(get_lock_path()))
 
     threads = [threading.Thread(target=attempt_lock) for _ in range(20)]
     for t in threads:

@@ -1,18 +1,35 @@
-import os
-import tempfile
-from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from sprintest.daemon import app, test_service
+from sprintest.context import DaemonContext
+from sprintest.daemon import app
+from sprintest.service import TestService
 
 
-def test_api_run_test_success() -> None:
-    client = TestClient(app)
+@pytest.fixture
+def client() -> TestClient:
+    context = DaemonContext(
+        lock_path="mock_lock",
+        socket_path=None,
+        status_path="mock_status",
+        cwd=".",
+        port=8000,
+        target_pkg="sprintest",
+        target_pkg_path=None,
+        version="0.1.0",
+        skip_uvicorn=False,
+    )
+    app.state.context = context
+    app.state.test_service = TestService(context)
+    return TestClient(app)
+
+
+def test_api_run_test_success(client: TestClient) -> None:
     payload = {"args": ["tests/test_foo.py"], "target_pkg": "sprintest"}
 
+    test_service = app.state.test_service
     with patch.object(test_service, "run_tests", new_callable=AsyncMock) as mock_run:
         mock_run.return_value = {
             "exit_code": 0,
@@ -29,10 +46,10 @@ def test_api_run_test_success() -> None:
         mock_run.assert_called_once()
 
 
-def test_api_run_test_busy() -> None:
-    client = TestClient(app)
+def test_api_run_test_busy(client: TestClient) -> None:
     payload = {"args": ["tests/test_foo.py"], "target_pkg": "sprintest"}
 
+    test_service = app.state.test_service
     with patch.object(test_service, "run_tests", new_callable=AsyncMock) as mock_run:
         mock_run.return_value = {"error": "busy"}
 

@@ -1,9 +1,8 @@
 import asyncio
-import os
 import threading
 from typing import Any
 
-from sprintest import constants
+from sprintest.context import DaemonContext
 from sprintest.logger import logger
 from sprintest.runner import NukeStrategy, TestRunner
 
@@ -11,7 +10,10 @@ from sprintest.runner import NukeStrategy, TestRunner
 class TestService:
     """Business logic for running tests and managing hot-reloading."""
 
-    def __init__(self) -> None:
+    __test__ = False
+
+    def __init__(self, context: DaemonContext) -> None:
+        self.context = context
         self.test_runner = TestRunner()
         self.nuke_strategy = NukeStrategy()
         self.test_lock = threading.Lock()
@@ -24,7 +26,7 @@ class TestService:
         use_stream: bool = False,
     ) -> dict[str, Any]:
         """Execute a test run with hot-reloading."""
-        target_pkg = target_pkg or os.environ.get(constants.ENV_TARGET_PKG)
+        target_pkg = target_pkg or self.context.target_pkg
 
         if not self.test_lock.acquire(blocking=False):
             return {
