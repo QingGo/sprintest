@@ -155,60 +155,84 @@ def create_app(context: DaemonContext, state: DaemonState) -> FastAPI:
 
 
 def acquire_daemon_lock(lock_path: str, internal_lock: threading.Lock) -> bool:
-    """Acquire the daemon lock file."""
-    while True:
-        with internal_lock:
-            os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    """Acquire the daemon lock file.
 
-            try:
+    Cross-process atomicity is guaranteed by os.O_EXCL.
+    The internal_lock is used to prevent multi-threaded races within the same process
+    while performing file operations.
+    """
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+
+    while True:
+        # 1. Try to create the lock file atomically
+        try:
+            with internal_lock:
                 fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 with os.fdopen(fd, "w") as f:
                     f.write(str(os.getpid()))
-                logger.debug(
-                    f"Created resource at absolute path: {os.path.abspath(lock_path)}"
-                )
-                return True
-            except FileExistsError:
+
+            logger.debug(
+                f"Created resource at absolute path: {os.path.abspath(lock_path)}"
+            )
+            return True
+        except FileExistsError:
+            # File already exists, continue to check if it's stale
+            pass
+        except OSError as e:
+            logger.error(f"Failed to create lock file at {lock_path}: {e}")
+            return False
+
+        # 2. Inspect the existing lock file (outside internal_lock)
+        try:
+            content = ""
+            # If the file was JUST created by another process, it might be empty for a moment.
+            # We retry a few times to read the content.
+            for _ in range(3):
                 try:
-                    content = ""
-                    for _ in range(3):
-                        with open(lock_path) as f:
-                            content = f.read().strip()
-                        if content:
-                            break
-                        time.sleep(0.01)
+                    with open(lock_path) as f:
+                        content = f.read().strip()
+                    if content:
+                        break
+                except FileNotFoundError:
+                    # Race condition: file was deleted just now.
+                    break
+                time.sleep(0.01)  # Wait outside the lock
 
-                    if not content:
-                        abs_path = os.path.abspath(lock_path)
-                        try:
+            if not content:
+                # File is empty and hasn't been filled in time, or was deleted.
+                # Try to remove it and retry the whole process.
+                abs_path = os.path.abspath(lock_path)
+                with internal_lock:
+                    try:
+                        if os.path.exists(lock_path):
                             os.remove(lock_path)
-                            logger.debug(
-                                f"Removing resource at absolute path: {abs_path}"
-                            )
-                        except OSError as e:
-                            logger.error(
-                                f"Failed to remove empty lock file at {abs_path}: {e}"
-                            )
-                        continue
+                            logger.debug(f"Removing empty resource at path: {abs_path}")
+                    except OSError:
+                        pass
+                continue
 
-                    pid = int(content)
-                    if not psutil.pid_exists(pid):
-                        abs_path = os.path.abspath(lock_path)
-                        try:
-                            os.remove(lock_path)
-                            logger.debug(
-                                f"Removing resource at absolute path: {abs_path}"
-                            )
-                        except OSError as e:
-                            logger.error(
-                                f"Failed to remove stale lock file at {abs_path}: {e}"
-                            )
-                        continue
-                    return False
-                except (OSError, ValueError):
-                    return False
-            except OSError:
-                return False
+            pid = int(content)
+            if not psutil.pid_exists(pid):
+                # PID is not running, lock is stale.
+                abs_path = os.path.abspath(lock_path)
+                with internal_lock:
+                    try:
+                        # Double check if it's still the same stale PID before removing?
+                        # For simplicity, we just try to remove it so we can retry.
+                        os.remove(lock_path)
+                        logger.debug(f"Removing stale resource at path: {abs_path}")
+                    except OSError:
+                        pass
+                continue
+
+            # PID exists and is active, acquisition failed.
+            return False
+        except (OSError, ValueError) as e:
+            # If we hit an error while reading or parsing, the file might be in flux.
+            # Log it and retry after a short delay.
+            logger.debug(f"Transient error while checking lock file: {e}")
+            time.sleep(0.01)
+            continue
     return False
 
 

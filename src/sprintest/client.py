@@ -90,18 +90,19 @@ class DaemonClient:
                     f"Daemon (PID {alive_pid}) is starting, waiting for it to be ready..."
                 )
 
-            # status.json is written inside the daemon's FastAPI lifespan, which
-            # runs only after uvicorn has bound its socket and is ready to serve.
-            # Polling read_status() is therefore sufficient — no separate health
-            # check round-trip is needed.
-            for _ in range(constants.DAEMON_START_RETRIES):
-                time.sleep(constants.DAEMON_START_WAIT)
-                if read_status():
-                    logger.info("Daemon started successfully!")
-                    return True
+        # status.json is written inside the daemon's FastAPI lifespan, which
+        # runs only after uvicorn has bound its socket and is ready to serve.
+        # Polling read_status() is therefore sufficient — no separate health
+        # check round-trip is needed.
+        # We poll OUTSIDE the lock to avoid blocking other concurrent requests.
+        for _ in range(constants.DAEMON_START_RETRIES):
+            time.sleep(constants.DAEMON_START_WAIT)
+            if read_status():
+                logger.info("Daemon started successfully!")
+                return True
 
-            logger.error("Daemon failed to start or respond within timeout.")
-            return False
+        logger.error("Daemon failed to start or respond within timeout.")
+        return False
 
     def _create_client(self, status: dict[str, Any]) -> httpx.Client:
         """Create an httpx.Client from status data."""
