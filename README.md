@@ -41,18 +41,54 @@ For AI/ML projects with heavy dependencies (`torch`, `transformers`, etc.), Spri
 
 Sprintest uses a decoupled architecture to ensure the daemon remains responsive even when running heavy tests.
 
+### System Architecture
 ```mermaid
 graph TD
-    Client[Client CLI] -->|HTTP over UDS/TCP| Daemon[FastAPI Daemon]
-    Daemon -->|Lifespan| Preloader[Package Preloader]
-    Daemon --> Service[Test Service]
-    Service -->|Atomic Lock| Service
-    Service --> Nuke[Nuke Engine]
-    Nuke -->|Strategy| PySys[sys.modules]
-    Service --> Runner[Pytest Runner]
-    Runner -->|Redirect IO| Tests[User Tests]
-    Daemon -.-> Status[(status.json)]
+    Client["Client CLI"] -->|HTTP over UDS/TCP| App["FastAPI App"]
+    subgraph "Daemon Process"
+        App --> Service["TestService"]
+        Service -->|Atomic Lock| Service
+        Service --> Nuke["NukeStrategy"]
+        Nuke -->|Module Unloading| PySys[sys.modules]
+        Service --> Runner["TestRunner"]
+        Runner -->|Pytest execution| Tests["User Tests"]
+    end
+    App -.-> Status["status.json"]
     Client -.-> Status
+```
+
+### Test Execution Flow
+```mermaid
+sequenceDiagram
+    participant C as "Client CLI"
+    participant S as "status.json"
+    participant D as "Daemon (FastAPI)"
+    participant N as "NukeStrategy"
+    participant R as "TestRunner"
+
+    C->>S: Read status
+    alt Daemon not running
+        C->>D: Start Daemon (subprocess)
+        D->>D: Acquire daemon.lock
+        D->>D: Start Uvicorn
+        D->>S: Write status (lifespan)
+        C->>S: Poll until ready
+    end
+
+    C->>D: POST /v1/test/run/stream
+    activate D
+    D->>D: Acquire test_lock
+    D->>N: nuke(target_pkg)
+    N-->>D: Modules unloaded
+    D->>R: run_tests(args)
+    R->>R: Redirect stdout/stderr
+    R->>R: pytest.main()
+    R-->>D: Exit code & Output
+    D->>N: nuke_tests()
+    N-->>D: Test modules cleared
+    D-->>C: Stream results
+    deactivate D
+    C->>C: Print output & exit
 ```
 
 ---

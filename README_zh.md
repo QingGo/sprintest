@@ -41,18 +41,54 @@
 
 Sprintest 采用解耦架构，确保即使在执行繁重的测试任务时，守护进程依然能快速响应。
 
+### 系统架构图
 ```mermaid
 graph TD
-    Client[客户端 CLI] -->|HTTP over UDS/TCP| Daemon[FastAPI 守护进程]
-    Daemon -->|Lifespan| Preloader[包预加载器]
-    Daemon --> Service[测试服务层]
-    Service -->|原子锁| Service
-    Service --> Nuke[清理引擎]
-    Nuke -->|策略| PySys[sys.modules]
-    Service --> Runner[Pytest 运行器]
-    Runner -->|IO 重定向| Tests[用户测试文件]
-    Daemon -.-> Status[(status.json)]
+    Client["客户端 CLI"] -->|HTTP over UDS/TCP| App["FastAPI 应用"]
+    subgraph "Daemon 进程"
+        App --> Service["TestService (业务逻辑)"]
+        Service -->|原子锁| Service
+        Service --> Nuke["NukeStrategy (模块清理)"]
+        Nuke -->|sys.modules 操作| PySys[sys.modules]
+        Service --> Runner["TestRunner (测试运行)"]
+        Runner -->|Pytest 执行| Tests["用户测试文件"]
+    end
+    App -.-> Status["status.json"]
     Client -.-> Status
+```
+
+### 测试执行时序图
+```mermaid
+sequenceDiagram
+    participant C as "客户端 CLI"
+    participant S as "status.json"
+    participant D as "Daemon (FastAPI)"
+    participant N as "NukeStrategy"
+    participant R as "TestRunner"
+
+    C->>S: 读取状态
+    alt Daemon 未运行
+        C->>D: 启动 Daemon (子进程)
+        D->>D: 获取 daemon.lock
+        D->>D: 启动 Uvicorn
+        D->>S: 写入 status.json (Lifespan)
+        C->>S: 轮询直到就绪
+    end
+
+    C->>D: POST /v1/test/run/stream
+    activate D
+    D->>D: 获取 test_lock
+    D->>N: nuke(target_pkg) (执行清理)
+    N-->>D: 模块已卸载
+    D->>R: run_tests(args)
+    R->>R: 重定向标准输出/错误
+    R->>R: 执行 pytest.main()
+    R-->>D: 返回退出码和输出
+    D->>N: nuke_tests() (清理测试模块)
+    N-->>D: 测试模块已移除
+    D-->>C: 流式返回结果
+    deactivate D
+    C->>C: 输出结果并退出
 ```
 
 ---
