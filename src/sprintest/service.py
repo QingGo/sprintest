@@ -4,7 +4,8 @@ import threading
 from typing import Any
 
 from sprintest.context import DaemonContext
-from sprintest.runner import NukeStrategy, TestRunner
+from sprintest.nuke import NukeStrategy
+from sprintest.runner import TestRunner
 
 logger = logging.getLogger(__name__)
 
