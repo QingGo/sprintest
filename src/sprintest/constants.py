@@ -5,7 +5,7 @@ VERSION = __version__
 
 # Network Defaults
 DEFAULT_PORT = 8000
-DEFAULT_HOST = "0.0.0.0"
+DEFAULT_HOST = "127.0.0.1"
 
 # Environment Variables
 ENV_PORT = "SPRINTEST_PORT"

@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import sys
+from typing import cast
 
 import httpx
 
@@ -49,25 +50,21 @@ def handle_run(client: DaemonClient, args: list[str], use_stream: bool) -> None:
 
     try:
         if use_stream:
-            resp = client.stream_test_run(payload)
-            if hasattr(resp, "iter_content"):
+            with client.stream_test_run(payload) as resp:
                 exit_code = 0
-                for chunk in resp.iter_content(chunk_size=None, decode_unicode=True):
+                for chunk in resp.iter_content(decode_unicode=True):
                     if chunk:
-                        if "[DONE]" in chunk:
-                            match = re.search(r"exit_code=(\d+)", chunk)
+                        s_chunk = cast("str", chunk)
+                        if "[DONE]" in s_chunk:
+                            match = re.search(r"exit_code=(\d+)", s_chunk)
                             if match:
                                 exit_code = int(match.group(1))
-                        print(chunk, end="", flush=True)
+                        print(s_chunk, end="", flush=True)
                 sys.exit(exit_code)
-            else:
-                # Fallback if stream_test_run returned a non-stream response (e.g. unix fallback)
-                print(resp.get("output", ""))
-                sys.exit(resp.get("exit_code", 0))
         else:
-            resp = client.send_request("run_test", payload)
-            print(resp.get("output", ""))
-            sys.exit(resp.get("exit_code", 0))
+            result = client.send_request("run_test", payload)
+            print(result.get("output", ""))
+            sys.exit(result.get("exit_code", 0))
     except (httpx.HTTPError, OSError) as e:
         logger.error(f"Test run failed: {e}")
         sys.exit(1)

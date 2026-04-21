@@ -139,17 +139,29 @@ def create_app(context: DaemonContext, state: DaemonState) -> FastAPI:
     ) -> StreamingResponse:
         """Execute a test run and stream results back to the client."""
         test_service: TestService = request.app.state.test_service
-        result = await test_service.run_tests(run_request.args, run_request.target_pkg)
 
-        if result.get("error") == "busy":
+        gen = test_service.run_tests_stream(run_request.args, run_request.target_pkg)
+
+        # Peek at the first chunk to check for busy error
+        try:
+            first_chunk = await gen.__anext__()
+        except StopAsyncIteration:
+
+            async def empty_gen() -> AsyncGenerator[str, None]:
+                if False:
+                    yield ""
+
+            return StreamingResponse(empty_gen(), media_type="text/plain")
+
+        if first_chunk == "error:busy":
             raise HTTPException(
                 status_code=429, detail="Another test is already running"
             )
 
         async def event_generator() -> AsyncGenerator[str, None]:
-            yield f"[STARTED] nuked {result['nuked_modules_count']} modules\n"
-            yield result["output"]
-            yield f"\n[DONE] exit_code={result['exit_code']}\n"
+            yield first_chunk
+            async for chunk in gen:
+                yield chunk
 
         return StreamingResponse(event_generator(), media_type="text/plain")
 

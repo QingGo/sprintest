@@ -260,25 +260,17 @@ class DaemonClient:
             resp.raise_for_status()
             return cast("dict[str, Any]", resp.json())
 
-    def stream_test_run(self, payload: dict[str, Any]) -> Any:
+    @contextmanager
+    def stream_test_run(
+        self, payload: dict[str, Any]
+    ) -> Generator[RequestsShim, None, None]:
         """Stream test results from the daemon."""
         self.start_daemon()
         status = read_status()
-        if status and status.get("type") == "unix":
-            transport = httpx.HTTPTransport(uds=status["socket_path"])
-            client = httpx.Client(
-                transport=transport,
-                base_url="http://127.0.0.1",
-                timeout=None,
-                trust_env=False,
-            )
-        else:
-            port = (status or {}).get(
-                "port", os.environ.get(constants.ENV_PORT, self.default_port)
-            )
-            client = httpx.Client(
-                base_url=f"http://127.0.0.1:{port}", timeout=None, trust_env=False
-            )
-
-        resp = client.post("/v1/test/run/stream", json=payload)
-        return RequestsShim(resp)
+        client = self._create_client(status or {})
+        try:
+            with client.stream("POST", "/v1/test/run/stream", json=payload) as resp:
+                resp.raise_for_status()
+                yield RequestsShim(resp)
+        finally:
+            client.close()
