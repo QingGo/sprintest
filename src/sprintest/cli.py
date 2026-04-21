@@ -3,6 +3,8 @@ import os
 import re
 import sys
 
+import httpx
+
 from sprintest import constants
 from sprintest.client import DaemonClient
 from sprintest.discovery import find_target_pkg
@@ -16,7 +18,7 @@ def handle_status(client: DaemonClient) -> None:
         logger.info(f"Sprintest Daemon ({resp['version']}): {resp['status']}")
     except RuntimeError:
         logger.info("No Sprintest Daemon is currently running.")
-    except Exception as e:
+    except (httpx.HTTPError, OSError) as e:
         logger.error(f"Could not reach daemon: {e}")
         sys.exit(1)
 
@@ -27,7 +29,7 @@ def handle_stop(client: DaemonClient) -> None:
         logger.info(resp.get("message", "Stopping..."))
     except RuntimeError:
         logger.info("No Sprintest Daemon is currently running.")
-    except Exception as e:
+    except (httpx.HTTPError, OSError) as e:
         logger.error(f"Could not stop daemon: {e}")
         sys.exit(1)
 
@@ -66,7 +68,7 @@ def handle_run(client: DaemonClient, args: list[str], use_stream: bool) -> None:
             resp = client.send_request("run_test", payload)
             print(resp.get("output", ""))
             sys.exit(resp.get("exit_code", 0))
-    except Exception as e:
+    except (httpx.HTTPError, OSError) as e:
         logger.error(f"Test run failed: {e}")
         sys.exit(1)
 

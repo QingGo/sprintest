@@ -41,7 +41,7 @@ def setup_logger(name: str = "sprintest", is_daemon: bool = False) -> logging.Lo
                 )
                 file_handler.setFormatter(formatter)
                 logger.addHandler(file_handler)
-            except Exception as e:
+            except OSError as e:
                 logger.warning(f"Failed to setup file logging: {e}")
 
     return logger

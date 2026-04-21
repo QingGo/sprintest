@@ -72,16 +72,27 @@ line-length = 88
 # TCH: flake8-type-checking
 # PLC: pylint-convention
 # UP: pyupgrade
-select = ["E", "F", "I", "B", "TCH", "PLC", "UP"]
+# S: flake8-bandit (包含 S110: try-except-pass)
+# BLE: flake8-blind-except
+select = ["E", "F", "I", "B", "TCH", "PLC", "UP", "S", "BLE"]
 # E501: Line too long
-ignore = ["E501"]
+# S104: Possible binding to all interfaces (needed for daemon)
+# S113: httpx call with timeout set to None (needed for long-running tests)
+ignore = ["E501", "S104", "S113"]
 
 [tool.ruff.lint.per-file-ignores]
 # F811: Redefinition of unused name
 # F401: Module imported but unused
 # B011: Do not call assert False
-# PLC0415: import should be at the top-level (allowed for lazy loading in tests)
-"tests/*" = ["F811", "F401", "B011", "PLC0415"]
+# S101: Use of assert detected (allowed in tests)
+# S110: try-except-pass (allowed in tests)
+# S603, S607: subprocess security checks (allowed in tests)
+# BLE001: blind except (allowed in tests)
+"tests/*" = ["F811", "F401", "B011", "PLC0415", "S101", "S110", "S603", "S607", "BLE001"]
+# Scratch scripts: allow asserts and blind exceptions
+"scratch/*" = ["S101", "BLE001"]
+# Examples: allow asserts for demonstration
+"examples/*" = ["S101"]
 
 [tool.pyright]
 include = ["src/sprintest"]

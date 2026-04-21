@@ -35,7 +35,7 @@ class RequestsShim:
     def get(self, key: str, default: Any = None) -> Any:
         try:
             return self.response.json().get(key, default)
-        except Exception:
+        except (ValueError, TypeError, KeyError):
             return default
 
 
@@ -54,7 +54,7 @@ class DaemonClient:
             with self._create_client(status) as client:
                 resp = client.get("/v1/status")
                 return resp.status_code == 200
-        except Exception as e:
+        except (httpx.HTTPError, OSError) as e:
             logger.debug(f"Could not connect to daemon: {e}")
             return False
 

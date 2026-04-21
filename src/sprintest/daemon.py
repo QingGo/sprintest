@@ -66,7 +66,7 @@ def load_config_patterns(cwd: str) -> list[str]:
                 )
                 if isinstance(user_patterns, list):
                     patterns.extend(user_patterns)
-        except Exception as e:
+        except (OSError, tomllib.TOMLDecodeError) as e:
             logger.warning(f"Failed to load ignore patterns from {path}: {e}")
     return patterns
 
@@ -156,54 +156,59 @@ def create_app(context: DaemonContext, state: DaemonState) -> FastAPI:
 
 def acquire_daemon_lock(lock_path: str, internal_lock: threading.Lock) -> bool:
     """Acquire the daemon lock file."""
-    with internal_lock:
-        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    while True:
+        with internal_lock:
+            os.makedirs(os.path.dirname(lock_path), exist_ok=True)
 
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            with os.fdopen(fd, "w") as f:
-                f.write(str(os.getpid()))
-            logger.debug(
-                f"Created resource at absolute path: {os.path.abspath(lock_path)}"
-            )
-            return True
-        except FileExistsError:
             try:
-                content = ""
-                for _ in range(3):
-                    with open(lock_path) as f:
-                        content = f.read().strip()
-                    if content:
-                        break
-                    time.sleep(0.01)
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with os.fdopen(fd, "w") as f:
+                    f.write(str(os.getpid()))
+                logger.debug(
+                    f"Created resource at absolute path: {os.path.abspath(lock_path)}"
+                )
+                return True
+            except FileExistsError:
+                try:
+                    content = ""
+                    for _ in range(3):
+                        with open(lock_path) as f:
+                            content = f.read().strip()
+                        if content:
+                            break
+                        time.sleep(0.01)
 
-                if not content:
-                    abs_path = os.path.abspath(lock_path)
-                    try:
-                        os.remove(lock_path)
-                        logger.debug(f"Removing resource at absolute path: {abs_path}")
-                    except OSError as e:
-                        logger.error(
-                            f"Failed to remove empty lock file at {abs_path}: {e}"
-                        )
-                    return acquire_daemon_lock(lock_path, internal_lock)
+                    if not content:
+                        abs_path = os.path.abspath(lock_path)
+                        try:
+                            os.remove(lock_path)
+                            logger.debug(
+                                f"Removing resource at absolute path: {abs_path}"
+                            )
+                        except OSError as e:
+                            logger.error(
+                                f"Failed to remove empty lock file at {abs_path}: {e}"
+                            )
+                        continue
 
-                pid = int(content)
-                if not psutil.pid_exists(pid):
-                    abs_path = os.path.abspath(lock_path)
-                    try:
-                        os.remove(lock_path)
-                        logger.debug(f"Removing resource at absolute path: {abs_path}")
-                    except OSError as e:
-                        logger.error(
-                            f"Failed to remove stale lock file at {abs_path}: {e}"
-                        )
-                    return acquire_daemon_lock(lock_path, internal_lock)
+                    pid = int(content)
+                    if not psutil.pid_exists(pid):
+                        abs_path = os.path.abspath(lock_path)
+                        try:
+                            os.remove(lock_path)
+                            logger.debug(
+                                f"Removing resource at absolute path: {abs_path}"
+                            )
+                        except OSError as e:
+                            logger.error(
+                                f"Failed to remove stale lock file at {abs_path}: {e}"
+                            )
+                        continue
+                    return False
+                except (OSError, ValueError):
+                    return False
+            except OSError:
                 return False
-            except Exception:
-                return False
-        except Exception:
-            return False
     return False
 
 
@@ -271,60 +276,74 @@ def run() -> None:
         )
         sys.exit(1)
 
-    app = create_app(context, state)
-
     try:
+        app = create_app(context, state)
+
         try:
+            try:
 
-            def exit_wrapper(sig: int, frame: Any) -> None:
-                handle_exit(sig, frame, state)
+                def exit_wrapper(sig: int, frame: Any) -> None:
+                    handle_exit(sig, frame, state)
 
-            signal.signal(signal.SIGTERM, exit_wrapper)
-            signal.signal(signal.SIGINT, exit_wrapper)
-        except ValueError:
-            pass
+                signal.signal(signal.SIGTERM, exit_wrapper)
+                signal.signal(signal.SIGINT, exit_wrapper)
+            except ValueError as e:
+                logger.debug(
+                    f"Signal handling setup failed (expected if not in main thread): {e}"
+                )
 
-        if context.skip_uvicorn:
-            logger.info("Skipping Uvicorn startup as requested (test mode).")
-            while not state.shutdown_event.is_set():
-                time.sleep(0.1)
-            return
+            if context.skip_uvicorn:
+                logger.info("Skipping Uvicorn startup as requested (test mode).")
+                while not state.shutdown_event.is_set():
+                    time.sleep(0.1)
+                return
 
-        if context.socket_path:
-            logger.info(f"Starting Uvicorn on Unix socket: {context.socket_path}")
-            uds_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            uds_sock.bind(context.socket_path)
-            logger.debug(
-                f"Unix socket bound at {context.socket_path} (fd={uds_sock.fileno()})"
-            )
-            uvicorn.run(
-                app,
-                fd=uds_sock.fileno(),
-                log_level="warning",
-            )
-        else:
-            logger.info(f"Starting Uvicorn on port {context.port}")
-            # Ensure port is not None for type safety
-            p = context.port if context.port is not None else constants.DEFAULT_PORT
-            uvicorn.run(
-                app,
-                host=constants.DEFAULT_HOST,
-                port=p,
-                log_level="warning",
-            )
-    finally:
-        # Cleanup using immutable context paths
-        logger.info("Daemon exiting: releasing lock, socket, and status files.")
-        if context.socket_path:
-            remove_socket(context.socket_path)
-        remove_status(context.status_path)
-        abs_lock_path = os.path.abspath(context.lock_path)
-        try:
-            if os.path.exists(context.lock_path):
-                os.remove(context.lock_path)
-                logger.debug(f"Removing resource at absolute path: {abs_lock_path}")
-        except OSError as e:
-            logger.error(f"Failed to remove lock file at {abs_lock_path}: {e}")
+            if context.socket_path:
+                # Remove stale socket if it exists
+                try:
+                    os.remove(context.socket_path)
+                except OSError as e:
+                    logger.debug(
+                        f"Note: Could not remove stale socket {context.socket_path}: {e}"
+                    )
+
+                logger.info(f"Starting Uvicorn on Unix socket: {context.socket_path}")
+                uds_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                uds_sock.bind(context.socket_path)
+                logger.debug(
+                    f"Unix socket bound at {context.socket_path} (fd={uds_sock.fileno()})"
+                )
+                uvicorn.run(
+                    app,
+                    fd=uds_sock.fileno(),
+                    log_level="warning",
+                )
+            else:
+                logger.info(f"Starting Uvicorn on port {context.port}")
+                # Ensure port is not None for type safety
+                p = context.port if context.port is not None else constants.DEFAULT_PORT
+                uvicorn.run(
+                    app,
+                    host=constants.DEFAULT_HOST,
+                    port=p,
+                    log_level="warning",
+                )
+        finally:
+            # Cleanup using immutable context paths
+            logger.info("Daemon exiting: releasing lock, socket, and status files.")
+            if context.socket_path:
+                remove_socket(context.socket_path)
+            remove_status(context.status_path)
+            abs_lock_path = os.path.abspath(context.lock_path)
+            try:
+                if os.path.exists(context.lock_path):
+                    os.remove(context.lock_path)
+                    logger.debug(f"Removing resource at absolute path: {abs_lock_path}")
+            except OSError as e:
+                logger.error(f"Failed to remove lock file at {abs_lock_path}: {e}")
+    except Exception:
+        logger.exception("Daemon startup failed unexpectedly")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

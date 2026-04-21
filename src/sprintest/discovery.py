@@ -1,6 +1,9 @@
 import ast
+import logging
 import os
 import sys
+
+logger = logging.getLogger(__name__)
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -24,8 +27,8 @@ def find_target_pkg() -> str | None:
                 and isinstance(config["project"]["name"], str)
             ):
                 return config["project"]["name"]
-        except Exception:
-            pass
+        except (OSError, tomllib.TOMLDecodeError) as e:
+            logger.debug(f"Failed to load package name from pyproject.toml: {e}")
 
     # 2. Try setup.py
     if os.path.exists("setup.py"):
@@ -45,8 +48,8 @@ def find_target_pkg() -> str | None:
                             and isinstance(keyword.value.value, str)
                         ):
                             return keyword.value.value
-        except Exception:
-            pass
+        except (OSError, SyntaxError, ValueError) as e:
+            logger.debug(f"Failed to parse setup.py for package name: {e}")
 
     # 3. Check src directory
     if os.path.exists("src"):

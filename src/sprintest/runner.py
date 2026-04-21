@@ -178,7 +178,7 @@ class TestRunner:
             ):
                 exit_code = pytest.main(pytest_args)
             output = stdout_buf.getvalue() + stderr_buf.getvalue()
-        except Exception as e:
+        except (OSError, RuntimeError) as e:
             logger.error(f"Error during test execution: {e}")
             output = f"Error: {e}\n"
             exit_code = 1

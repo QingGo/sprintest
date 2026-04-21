@@ -149,4 +149,5 @@ cython_debug/
 # project
 docs/checklist.md
 docs/prd.md
+docs/note.md
 .sprintest/
