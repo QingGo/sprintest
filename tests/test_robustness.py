@@ -55,16 +55,15 @@ def test_stale_status_recovery(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -
     remove_status()
 
 
-def test_status_trusted_without_health_check(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify _get_client() trusts status.json without a health-check round-trip.
+def test_status_verified_with_health_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify _get_client() verifies status.json with a health-check.
 
-    Under the new design, status.json is written only after uvicorn's lifespan
-    runs (i.e., the socket is bound and requests can be accepted).  Therefore
-    the client must NOT perform a separate health check; it should use the
-    connection details from status.json directly.
+    Under the improved design, status.json is NOT trusted blindly. The client
+    checks for status='ready' and performs a health check.
     """
     proc = subprocess.Popen(["sleep", "10"])
     try:
+        # 1. Status exists but is not 'ready'
         write_status(
             {
                 "pid": proc.pid,
@@ -72,32 +71,33 @@ def test_status_trusted_without_health_check(monkeypatch: pytest.MonkeyPatch) ->
                 "port": 8890,
                 "version": constants.VERSION,
                 "start_time": time.time(),
+                "status": "loading",
             }
         )
 
         client = DaemonClient(port="8890")
-
-        # _get_client() should yield a client pointed at port 8890
-        # without calling start_daemon() at all.
-        called: list[bool] = []
+        called_start: list[bool] = []
 
         def mock_start() -> bool:
-            called.append(True)
-            return False
+            called_start.append(True)
+            # Update status to ready for the second read in _get_client
+            write_status({
+                "pid": proc.pid,
+                "type": "tcp",
+                "port": 8890,
+                "version": constants.VERSION,
+                "status": "ready"
+            })
+            return True
 
         monkeypatch.setattr(client, "start_daemon", mock_start)
+        # Mock health check to fail for the first attempt
+        monkeypatch.setattr(client, "_check_health", lambda: False)
 
-        try:
-            with client._get_client() as c:
-                assert "8890" in str(c.base_url)
-        except Exception:
-            # Connection will be refused (no server listening) — that's expected;
-            # the important assertion is that start_daemon was NOT called.
-            pass
+        with client._get_client() as c:
+            assert "8890" in str(c.base_url)
 
-        assert len(called) == 0, (
-            "start_daemon should not be called when status.json is present"
-        )
+        assert len(called_start) == 1, "start_daemon should be called if status is not ready or health check fails"
     finally:
         proc.terminate()
         remove_status()

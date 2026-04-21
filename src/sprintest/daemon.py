@@ -76,11 +76,14 @@ def create_app(context: DaemonContext, state: DaemonState) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+        start_time = time.time()
+        perf_start = time.perf_counter()
         config: dict[str, Any] = {
             "pid": os.getpid(),
             "version": context.version,
-            "start_time": time.time(),
+            "start_time": start_time,
             "cwd": context.cwd,
+            "status": "loading",
         }
         if context.socket_path:
             config.update({"type": "unix", "socket_path": context.socket_path})
@@ -88,8 +91,22 @@ def create_app(context: DaemonContext, state: DaemonState) -> FastAPI:
             config.update({"type": "tcp", "port": context.port})
 
         write_status(config, path=context.status_path)
-        logger.debug("status.json written — daemon is ready to accept connections.")
-        pre_load_package(context)
+        logger.debug("status.json written — daemon is starting up.")
+
+        target_pkg = context.target_pkg
+        if target_pkg:
+            logger.info(f"Pre-loading package: {target_pkg}...")
+            pre_load_package(context)
+            duration = time.perf_counter() - perf_start
+            logger.info(f"Package pre-loading finished in {duration:.2f}s")
+        else:
+            logger.debug("No package specified for pre-loading.")
+
+        # Update status to ready
+        config["status"] = "ready"
+        config["ready_time"] = time.time()
+        write_status(config, path=context.status_path)
+        logger.info("Sprintest Daemon is ready to accept connections.")
         yield
 
     app = FastAPI(lifespan=lifespan)

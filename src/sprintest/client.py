@@ -9,6 +9,7 @@ from threading import Lock
 from typing import Any, cast
 
 import httpx
+import psutil
 
 from sprintest import constants
 from sprintest.paths import ensure_sprintest_dir
@@ -90,18 +91,52 @@ class DaemonClient:
                     f"Daemon (PID {alive_pid}) is starting, waiting for it to be ready..."
                 )
 
-        # status.json is written inside the daemon's FastAPI lifespan, which
-        # runs only after uvicorn has bound its socket and is ready to serve.
-        # Polling read_status() is therefore sufficient — no separate health
-        # check round-trip is needed.
-        # We poll OUTSIDE the lock to avoid blocking other concurrent requests.
-        for _ in range(constants.DAEMON_START_RETRIES):
-            time.sleep(constants.DAEMON_START_WAIT)
-            if read_status():
-                logger.info("Daemon started successfully!")
-                return True
+        # Wait for daemon to be ready
+        last_feedback = 0.0
+        consecutive_missing_status = 0
+        
+        # We need the PID to monitor survival. If we just spawned it, it's in pop.pid (but we didn't save it).
+        # We can always rely on the lock file which was just updated/verified.
+        monitored_pid = read_lock_pid()
 
-        logger.error("Daemon failed to start or respond within timeout.")
+        for _i in range(constants.DAEMON_START_RETRIES * 10): # Allow more retries if process is alive
+            # 1. Check if the process is still alive
+            if monitored_pid and not psutil.pid_exists(monitored_pid):
+                # Process died! Check why.
+                status = read_status()
+                if not status:
+                    logger.error(f"Daemon process (PID {monitored_pid}) died before writing status. Check .sprintest/daemon.log")
+                else:
+                    logger.error(f"Daemon process (PID {monitored_pid}) died during '{status.get('status')}' phase.")
+                return False
+
+            # 2. Check status file
+            status = read_status()
+            if status:
+                consecutive_missing_status = 0
+                state = status.get("status")
+                if state == "ready":
+                    if self._check_health():
+                        logger.info("Daemon started successfully!")
+                        return True
+                elif state == "loading":
+                    now = time.time()
+                    if now - last_feedback > 2.0:
+                        logger.info("Daemon is pre-loading packages, please wait...")
+                        last_feedback = now
+                    # As long as it's loading and alive, we continue the loop
+                else:
+                    if self._check_health():
+                        return True
+            else:
+                consecutive_missing_status += 1
+                if consecutive_missing_status > constants.DAEMON_START_RETRIES:
+                    logger.error("Daemon process is alive but failed to initialize status file (potential deadlock).")
+                    return False
+
+            time.sleep(constants.DAEMON_START_WAIT)
+
+        logger.error("Daemon failed to become ready within maximum timeout.")
         return False
 
     def _create_client(self, status: dict[str, Any]) -> httpx.Client:
@@ -153,8 +188,6 @@ class DaemonClient:
         """Create an httpx.Client configured for the current daemon state.
 
         Starts a new daemon automatically if none is running.
-        status.json is written only after uvicorn is ready (in lifespan),
-        so a non-None read_status() result means the daemon is connectable.
         """
         # 1. Environment variable port override
         env_port = os.environ.get(constants.ENV_PORT)
@@ -165,17 +198,20 @@ class DaemonClient:
                 yield client
                 return
 
-        # 2. Try existing status — if it exists, uvicorn is ready
+        # 2. Try existing status — only use if ready and responding
         status = read_status()
-        if status:
-            daemon_type = status.get("type", "unknown")
-            daemon_id = status.get("pid", "unknown")
-            logger.debug(f"Found existing {daemon_type} daemon (PID: {daemon_id})")
-            with self._create_client(status) as client:
-                yield client
-                return
-        else:
-            logger.debug("No active daemon status found.")
+        if status and status.get("status") == "ready":
+            if self._check_health():
+                daemon_type = status.get("type", "unknown")
+                daemon_id = status.get("pid", "unknown")
+                logger.debug(f"Found existing {daemon_type} daemon (PID: {daemon_id})")
+                with self._create_client(status) as client:
+                    yield client
+                    return
+            else:
+                logger.debug("Existing daemon found but not responding. Re-starting...")
+        elif status:
+            logger.debug(f"Existing daemon found in state: {status.get('status')}")
 
         # 3. Start daemon if missing or dead
         if self.start_daemon():
