@@ -29,6 +29,7 @@ def test_daemon_path_drift_resilience(tmp_path: Any) -> None:
     env = os.environ.copy()
     env["SPRINTEST_DIR"] = str(original_dir)
     env["SPRINTEST_FORCE_TCP"] = "1"  # Use TCP for simpler interaction
+    env["SPRINTEST_PORT"] = "8001"    # Use a different port to avoid conflict
 
     # Start the daemon
     proc = subprocess.Popen(
@@ -46,7 +47,8 @@ def test_daemon_path_drift_resilience(tmp_path: Any) -> None:
         start_time = time.time()
         while not status_file.exists():
             if time.time() - start_time > 10:
-                pytest.fail("Daemon failed to start")
+                stdout, stderr = proc.communicate()
+                pytest.fail(f"Daemon failed to start. Stderr: {stderr}")
             time.sleep(0.1)
 
         import json

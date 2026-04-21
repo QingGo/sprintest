@@ -13,7 +13,7 @@ import psutil
 
 from sprintest import constants
 from sprintest.paths import ensure_sprintest_dir
-from sprintest.status import read_lock_pid, read_status
+from sprintest.status import is_daemon_alive, read_lock_pid, read_status
 
 logger = logging.getLogger(__name__)
 
@@ -66,26 +66,30 @@ class DaemonClient:
         second concurrent call never spawns a duplicate process.
         """
         with self.internal_lock:
-            # Already fully ready?
+            # Already fully ready? Check if it responds to health check.
             status = read_status()
-            if status:
-                return True
+            if status and status.get("status") == "ready":
+                if self._check_health():
+                    return True
+                logger.debug("Existing daemon 'ready' but not responding. Re-starting...")
 
             # Lock file present with a live PID means a daemon is in the middle
             # of starting (it has acquired the lock but lifespan hasn't run yet).
             # Skip spawning and just wait for status.json to appear.
             alive_pid = read_lock_pid()
+            spawned_pid = None
             if not alive_pid:
                 logger.info("Starting Sprintest Daemon...")
                 ensure_sprintest_dir()
                 log_path = os.path.join(constants.SPRINTEST_DIR, constants.LOG_FILE)
                 log_file = open(log_path, "a")
-                subprocess.Popen(
+                proc = subprocess.Popen(
                     [sys.executable, "-m", "sprintest.daemon"],
                     stdout=log_file,
                     stderr=log_file,
                     start_new_session=True,
                 )
+                spawned_pid = proc.pid
             else:
                 logger.debug(
                     f"Daemon (PID {alive_pid}) is starting, waiting for it to be ready..."
@@ -95,13 +99,14 @@ class DaemonClient:
         last_feedback = 0.0
         consecutive_missing_status = 0
         
-        # We need the PID to monitor survival. If we just spawned it, it's in pop.pid (but we didn't save it).
-        # We can always rely on the lock file which was just updated/verified.
-        monitored_pid = read_lock_pid()
+        # We need the PID to monitor survival. 
+        # If we spawned it, we use the captured PID. 
+        # Otherwise, we use whatever was in the lock file.
+        monitored_pid = spawned_pid or alive_pid or read_lock_pid()
 
         for _i in range(constants.DAEMON_START_RETRIES * 10): # Allow more retries if process is alive
             # 1. Check if the process is still alive
-            if monitored_pid and not psutil.pid_exists(monitored_pid):
+            if monitored_pid and not is_daemon_alive(monitored_pid):
                 # Process died! Check why.
                 status = read_status()
                 if not status:
@@ -265,9 +270,14 @@ class DaemonClient:
         self, payload: dict[str, Any]
     ) -> Generator[RequestsShim, None, None]:
         """Stream test results from the daemon."""
-        self.start_daemon()
+        if not self.start_daemon():
+            raise RuntimeError("Failed to start or connect to Sprintest Daemon.")
+
         status = read_status()
-        client = self._create_client(status or {})
+        if not status:
+            raise RuntimeError("Daemon is reported as ready but status.json is missing.")
+            
+        client = self._create_client(status)
         try:
             with client.stream("POST", "/v1/test/run/stream", json=payload) as resp:
                 resp.raise_for_status()

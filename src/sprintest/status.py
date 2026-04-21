@@ -15,6 +15,27 @@ from sprintest.paths import (
 logger = logging.getLogger(__name__)
 
 
+def is_daemon_alive(pid: int) -> bool:
+    """Verify if the process with given PID is actually a sprintest daemon."""
+    if not psutil.pid_exists(pid):
+        return False
+    try:
+        p = psutil.Process(pid)
+        # Check if the command line contains our known markers.
+        # This prevents collision with recycled PIDs or unrelated processes.
+        cmdline = p.cmdline()
+        cmdline_str = " ".join(cmdline)
+        res = "sprintest.daemon" in cmdline_str or "stest-daemon" in cmdline_str
+        if not res:
+            logger.debug(f"PID {pid} is NOT a sprintest daemon. cmdline: {cmdline}")
+        return res
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        # If we can't inspect it but pid_exists was True, we might be in a
+        # restricted environment (e.g. different user). To be safe, we assume
+        # it might be our daemon, but usually root/same-user can see cmdline.
+        return True
+
+
 def write_status(data: dict[str, Any], path: str | None = None) -> str:
     """写入状态文件"""
     ensure_sprintest_dir()
@@ -45,8 +66,8 @@ def read_status() -> dict[str, Any] | None:
 
             # 验证进程存活
             pid = data.get("pid")
-            if pid and not psutil.pid_exists(pid):
-                logger.warning(f"Removing stale status file (PID {pid} is not running)")
+            if pid and not is_daemon_alive(pid):
+                logger.warning(f"Removing stale status file (PID {pid} is not a sprintest daemon)")
                 remove_status(path)
                 return None
 
@@ -73,10 +94,10 @@ def read_lock_pid() -> int | None:
             return None
 
         pid = int(content)
-        if psutil.pid_exists(pid):
+        if is_daemon_alive(pid):
             return pid
-        # Stale lock — process is gone
-        logger.debug(f"Lock file {lock_path} is stale (PID {pid} not running)")
+        # Stale lock — process is gone or not ours
+        logger.debug(f"Lock file {lock_path} is stale (PID {pid} is not a sprintest daemon)")
         return None
     except (OSError, ValueError) as e:
         logger.debug(f"Failed to read lock file {lock_path}: {e}")

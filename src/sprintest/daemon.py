@@ -29,6 +29,7 @@ from sprintest.paths import (
 from sprintest.service import TestService
 from sprintest.state import DaemonState
 from sprintest.status import (
+    is_daemon_alive,
     remove_socket,
     remove_status,
     write_status,
@@ -241,7 +242,7 @@ def acquire_daemon_lock(lock_path: str, internal_lock: threading.Lock) -> bool:
                 continue
 
             pid = int(content)
-            if not psutil.pid_exists(pid):
+            if not is_daemon_alive(pid):
                 # PID is not running, lock is stale.
                 abs_path = os.path.abspath(lock_path)
                 with internal_lock:

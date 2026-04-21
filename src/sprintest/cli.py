@@ -71,6 +71,9 @@ def handle_run(client: DaemonClient, args: list[str], use_stream: bool) -> None:
 
 
 def main() -> None:
+    from sprintest.logger import setup_logger
+    setup_logger("sprintest")
+
     args = sys.argv[1:]
     if not args:
         print("Usage: sprintest [status|stop|--no-stream|--version] [pytest_args...]")
