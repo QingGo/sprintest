@@ -150,4 +150,5 @@ cython_debug/
 docs/checklist.md
 docs/prd.md
 docs/note.md
-.sprintest/
+.sprintest*/
+.agent_memory.md

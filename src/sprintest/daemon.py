@@ -87,7 +87,7 @@ def create_app(context: DaemonContext, state: DaemonState) -> FastAPI:
         else:
             config.update({"type": "tcp", "port": context.port})
 
-        write_status(config)
+        write_status(config, path=context.status_path)
         logger.debug("status.json written — daemon is ready to accept connections.")
         pre_load_package(context)
         yield

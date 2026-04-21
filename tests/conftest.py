@@ -1,12 +1,11 @@
+# ruff: noqa: E402
 import os
 import tempfile
 
-# Isolate the test session from the real project's .sprintest directory
-# This is crucial when running "self-hosting" tests (sprintest testing itself)
-if "SPRINTEST_DIR" not in os.environ:
-    _temp_dir = tempfile.TemporaryDirectory(prefix="sprintest_test_")
-    os.environ["SPRINTEST_DIR"] = _temp_dir.name
-    # Note: the directory will be cleaned up when the process exits
+# Forcefully isolate the test session from ANY existing .sprintest directory.
+# This prevents self-hosting tests (`stest tests`) from corrupting the parent daemon's workspace.
+_temp_dir = tempfile.TemporaryDirectory(prefix="sprintest_test_")
+os.environ["SPRINTEST_DIR"] = _temp_dir.name
 import socket
 import subprocess
 import sys

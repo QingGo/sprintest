@@ -15,10 +15,10 @@ from sprintest.paths import (
 logger = logging.getLogger(__name__)
 
 
-def write_status(data: dict[str, Any]) -> str:
+def write_status(data: dict[str, Any], path: str | None = None) -> str:
     """写入状态文件"""
     ensure_sprintest_dir()
-    path = get_status_path()
+    path = path or get_status_path()
     tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "w") as f:
