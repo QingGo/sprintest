@@ -1,10 +1,10 @@
 import json
+import logging
 import os
 from typing import Any
 
 import psutil
 
-from sprintest.logger import setup_logger
 from sprintest.paths import (
     ensure_sprintest_dir,
     get_lock_path,
@@ -12,7 +12,7 @@ from sprintest.paths import (
     get_status_path,
 )
 
-logger = setup_logger("sprintest.status")
+logger = logging.getLogger(__name__)
 
 
 def write_status(data: dict[str, Any]) -> str:

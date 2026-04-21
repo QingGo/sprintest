@@ -1,4 +1,5 @@
 import importlib
+import logging
 import os
 import signal
 import socket
@@ -26,13 +27,19 @@ from sprintest.paths import (
     get_status_path,
 )
 from sprintest.service import TestService
+from sprintest.state import DaemonState
 from sprintest.status import (
     remove_socket,
     remove_status,
     write_status,
 )
 
-logger = setup_logger("sprintest", is_daemon=True)
+try:
+    import tomllib  # type: ignore
+except ImportError:
+    import tomli as tomllib  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 
 class TestRunRequest(BaseModel):
@@ -46,39 +53,110 @@ class TestRunResponse(BaseModel):
     nuked_modules_count: int
 
 
-# Global state
-shutdown_event = threading.Event()
+def load_config_patterns(cwd: str) -> list[str]:
+    """Load ignore patterns from pyproject.toml."""
+    patterns: list[str] = []
+    path = os.path.join(cwd, "pyproject.toml")
+    if os.path.exists(path):
+        try:
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+                user_patterns = (
+                    data.get("tool", {}).get("sprintest", {}).get("ignore", [])
+                )
+                if isinstance(user_patterns, list):
+                    patterns.extend(user_patterns)
+        except Exception as e:
+            logger.warning(f"Failed to load ignore patterns from {path}: {e}")
+    return patterns
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    context: DaemonContext = app.state.context
-    config: dict[str, Any] = {
-        "pid": os.getpid(),
-        "version": context.version,
-        "start_time": time.time(),
-        "cwd": context.cwd,
-    }
-    if context.socket_path:
-        config.update({"type": "unix", "socket_path": context.socket_path})
-    else:
-        config.update({"type": "tcp", "port": context.port})
+def create_app(context: DaemonContext, state: DaemonState) -> FastAPI:
+    """App factory to create and configure the FastAPI application."""
 
-    write_status(config)
-    logger.debug("status.json written — daemon is ready to accept connections.")
-    pre_load_package(context)
-    yield
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+        config: dict[str, Any] = {
+            "pid": os.getpid(),
+            "version": context.version,
+            "start_time": time.time(),
+            "cwd": context.cwd,
+        }
+        if context.socket_path:
+            config.update({"type": "unix", "socket_path": context.socket_path})
+        else:
+            config.update({"type": "tcp", "port": context.port})
+
+        write_status(config)
+        logger.debug("status.json written — daemon is ready to accept connections.")
+        pre_load_package(context)
+        yield
+
+    app = FastAPI(lifespan=lifespan)
+    app.state.context = context
+    app.state.state = state
+    app.state.test_service = TestService(context)
+
+    @app.post("/v1/test/run")
+    async def run_test(
+        run_request: TestRunRequest, request: Request
+    ) -> TestRunResponse:
+        """Execute a test run and return results."""
+        test_service: TestService = request.app.state.test_service
+        result = await test_service.run_tests(run_request.args, run_request.target_pkg)
+
+        if result.get("error") == "busy":
+            raise HTTPException(
+                status_code=429, detail="Another test is already running"
+            )
+
+        return TestRunResponse(
+            exit_code=result["exit_code"],
+            output=result["output"],
+            nuked_modules_count=result["nuked_modules_count"],
+        )
+
+    @app.post("/v1/test/run/stream")
+    async def run_test_stream(
+        run_request: TestRunRequest, request: Request
+    ) -> StreamingResponse:
+        """Execute a test run and stream results back to the client."""
+        test_service: TestService = request.app.state.test_service
+        result = await test_service.run_tests(run_request.args, run_request.target_pkg)
+
+        if result.get("error") == "busy":
+            raise HTTPException(
+                status_code=429, detail="Another test is already running"
+            )
+
+        async def event_generator() -> AsyncGenerator[str, None]:
+            yield f"[STARTED] nuked {result['nuked_modules_count']} modules\n"
+            yield result["output"]
+            yield f"\n[DONE] exit_code={result['exit_code']}\n"
+
+        return StreamingResponse(event_generator(), media_type="text/plain")
+
+    @app.get("/v1/status")
+    def status() -> dict[str, str]:
+        return {"status": "running", "version": context.version}
+
+    @app.post("/v1/stop")
+    def stop() -> dict[str, str]:
+        logger.info("Stop request received, initiating shutdown...")
+
+        def shutdown() -> None:
+            time.sleep(0.5)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        threading.Thread(target=shutdown, daemon=True).start()
+        return {"message": "Sprintest Daemon is shutting down..."}
+
+    return app
 
 
-app = FastAPI(lifespan=lifespan)
-
-
-_lock_internal = threading.Lock()
-
-
-def acquire_daemon_lock(lock_path: str) -> bool:
+def acquire_daemon_lock(lock_path: str, internal_lock: threading.Lock) -> bool:
     """Acquire the daemon lock file."""
-    with _lock_internal:
+    with internal_lock:
         os.makedirs(os.path.dirname(lock_path), exist_ok=True)
 
         try:
@@ -108,7 +186,7 @@ def acquire_daemon_lock(lock_path: str) -> bool:
                         logger.error(
                             f"Failed to remove empty lock file at {abs_path}: {e}"
                         )
-                    return acquire_daemon_lock(lock_path)
+                    return acquire_daemon_lock(lock_path, internal_lock)
 
                 pid = int(content)
                 if not psutil.pid_exists(pid):
@@ -120,76 +198,19 @@ def acquire_daemon_lock(lock_path: str) -> bool:
                         logger.error(
                             f"Failed to remove stale lock file at {abs_path}: {e}"
                         )
-                    return acquire_daemon_lock(lock_path)
+                    return acquire_daemon_lock(lock_path, internal_lock)
                 return False
             except Exception:
                 return False
         except Exception:
             return False
+    return False
 
 
-@app.post("/v1/test/run")
-async def run_test(run_request: TestRunRequest, request: Request) -> TestRunResponse:
-    """Execute a test run and return results."""
-    test_service: TestService = request.app.state.test_service
-    result = await test_service.run_tests(run_request.args, run_request.target_pkg)
-
-    if result.get("error") == "busy":
-        raise HTTPException(status_code=429, detail="Another test is already running")
-
-    return TestRunResponse(
-        exit_code=result["exit_code"],
-        output=result["output"],
-        nuked_modules_count=result["nuked_modules_count"],
-    )
-
-
-@app.post("/v1/test/run/stream")
-async def run_test_stream(
-    run_request: TestRunRequest, request: Request
-) -> StreamingResponse:
-    """Execute a test run and stream results back to the client."""
-    test_service: TestService = request.app.state.test_service
-    result = await test_service.run_tests(run_request.args, run_request.target_pkg)
-
-    if result.get("error") == "busy":
-        raise HTTPException(status_code=429, detail="Another test is already running")
-
-    async def event_generator() -> AsyncGenerator[str, None]:
-        yield f"[STARTED] nuked {result['nuked_modules_count']} modules\n"
-        yield result["output"]
-        yield f"\n[DONE] exit_code={result['exit_code']}\n"
-
-    return StreamingResponse(event_generator(), media_type="text/plain")
-
-
-@app.get("/v1/status")
-def status() -> dict[str, str]:
-    return {"status": "running", "version": constants.VERSION}
-
-
-@app.post("/v1/stop")
-def stop() -> dict[str, str]:
-    logger.info("Stop request received, initiating shutdown...")
-
-    def shutdown() -> None:
-        time.sleep(0.5)
-        os.kill(os.getpid(), signal.SIGTERM)
-
-    threading.Thread(target=shutdown, daemon=True).start()
-    return {"message": "Sprintest Daemon is shutting down..."}
-
-
-def handle_exit(sig: int, frame: Any) -> None:
-    """Signal handler: mark shutdown and exit via SystemExit.
-
-    Cleanup (lock / socket / status) is handled exclusively by the
-    finally block in run(), which catches SystemExit just like any
-    other exception.  Do NOT perform cleanup here to avoid double-
-    removal races.
-    """
+def handle_exit(sig: int, frame: Any, state: DaemonState) -> None:
+    """Signal handler: mark shutdown and exit via SystemExit."""
     logger.info(f"Daemon received signal {sig}, initiating graceful shutdown...")
-    shutdown_event.set()
+    state.shutdown_event.set()
     sys.exit(0)
 
 
@@ -216,47 +237,56 @@ def pre_load_package(context: DaemonContext) -> None:
 
 
 def run() -> None:
+    # Setup root logger for the daemon
+    setup_logger("sprintest", is_daemon=True)
+
     # Initialize the immutable context at the very start
     ensure_sprintest_dir()
     use_unix = (
         hasattr(socket, "AF_UNIX") and os.environ.get(constants.ENV_FORCE_TCP) != "1"
     )
 
+    cwd = os.getcwd()
     target_pkg = os.environ.get(constants.ENV_TARGET_PKG) or find_target_pkg()
+    ignore_patterns = load_config_patterns(cwd)
 
     context = DaemonContext(
         lock_path=get_lock_path(),
         socket_path=get_socket_path() if use_unix else None,
         status_path=get_status_path(),
-        cwd=os.getcwd(),
+        cwd=cwd,
         port=int(os.environ.get(constants.ENV_PORT, constants.DEFAULT_PORT)),
         target_pkg=target_pkg,
         target_pkg_path=os.environ.get(constants.ENV_TARGET_PKG_PATH),
         version=constants.VERSION,
         skip_uvicorn=os.environ.get(constants.ENV_SKIP_UVICORN) == "1",
+        ignore_patterns=ignore_patterns,
     )
 
-    if not acquire_daemon_lock(context.lock_path):
+    state = DaemonState()
+
+    if not acquire_daemon_lock(context.lock_path, state.internal_lock):
         logger.error(
             "Another instance of Sprintest Daemon is already running. Exiting."
         )
         sys.exit(1)
 
-    # Initialize service with context and store in app state
-    test_service = TestService(context)
-    app.state.context = context
-    app.state.test_service = test_service
+    app = create_app(context, state)
 
     try:
         try:
-            signal.signal(signal.SIGTERM, handle_exit)
-            signal.signal(signal.SIGINT, handle_exit)
+
+            def exit_wrapper(sig: int, frame: Any) -> None:
+                handle_exit(sig, frame, state)
+
+            signal.signal(signal.SIGTERM, exit_wrapper)
+            signal.signal(signal.SIGINT, exit_wrapper)
         except ValueError:
             pass
 
         if context.skip_uvicorn:
             logger.info("Skipping Uvicorn startup as requested (test mode).")
-            while not shutdown_event.is_set():
+            while not state.shutdown_event.is_set():
                 time.sleep(0.1)
             return
 

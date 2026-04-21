@@ -46,6 +46,4 @@ def setup_logger(name: str = "sprintest", is_daemon: bool = False) -> logging.Lo
 
     return logger
 
-
-# Default logger for general use
-logger = setup_logger()
+    return logger

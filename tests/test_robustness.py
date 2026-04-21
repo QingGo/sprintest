@@ -133,13 +133,16 @@ def test_concurrency_lock_atomicity(
     """Verify lock atomicity by having multiple threads attempt to start daemon simultaneously."""
     monkeypatch.setenv("SPRINTEST_DIR", str(tmp_path))
 
+    from threading import Lock
+
     from sprintest.daemon import acquire_daemon_lock
     from sprintest.paths import get_lock_path
 
+    lock = Lock()
     results: list[bool] = []
 
     def attempt_lock() -> None:
-        results.append(acquire_daemon_lock(get_lock_path()))
+        results.append(acquire_daemon_lock(get_lock_path(), lock))
 
     threads = [threading.Thread(target=attempt_lock) for _ in range(20)]
     for t in threads:

@@ -1,16 +1,18 @@
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from sprintest.context import DaemonContext
-from sprintest.daemon import app
+from sprintest.daemon import create_app
 from sprintest.service import TestService
+from sprintest.state import DaemonState
 
 
 @pytest.fixture
-def client() -> TestClient:
-    context = DaemonContext(
+def context() -> DaemonContext:
+    return DaemonContext(
         lock_path="mock_lock",
         socket_path=None,
         status_path="mock_status",
@@ -20,13 +22,22 @@ def client() -> TestClient:
         target_pkg_path=None,
         version="0.1.0",
         skip_uvicorn=False,
+        ignore_patterns=[],
     )
-    app.state.context = context
-    app.state.test_service = TestService(context)
+
+
+@pytest.fixture
+def app(context: DaemonContext) -> Any:
+    state = DaemonState()
+    return create_app(context, state)
+
+
+@pytest.fixture
+def client(app: Any) -> TestClient:
     return TestClient(app)
 
 
-def test_api_run_test_success(client: TestClient) -> None:
+def test_api_run_test_success(client: TestClient, app: Any) -> None:
     payload = {"args": ["tests/test_foo.py"], "target_pkg": "sprintest"}
 
     test_service = app.state.test_service
@@ -46,7 +57,7 @@ def test_api_run_test_success(client: TestClient) -> None:
         mock_run.assert_called_once()
 
 
-def test_api_run_test_busy(client: TestClient) -> None:
+def test_api_run_test_busy(client: TestClient, app: Any) -> None:
     payload = {"args": ["tests/test_foo.py"], "target_pkg": "sprintest"}
 
     test_service = app.state.test_service

@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import sys
@@ -5,7 +6,8 @@ import sys
 from sprintest import constants
 from sprintest.client import DaemonClient
 from sprintest.discovery import find_target_pkg
-from sprintest.logger import logger
+
+logger = logging.getLogger(__name__)
 
 
 def handle_status(client: DaemonClient) -> None:

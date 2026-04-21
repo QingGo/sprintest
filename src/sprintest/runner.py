@@ -12,12 +12,7 @@ from typing import Any
 
 import pytest
 
-from sprintest.logger import logger
-
-try:
-    import tomllib  # type: ignore
-except ImportError:
-    import tomli as tomllib  # type: ignore
+logger = logging.getLogger(__name__)
 
 
 def clean_ansi(text: str) -> str:
@@ -29,33 +24,22 @@ def clean_ansi(text: str) -> str:
 class NukeStrategy:
     """Strategy for unloading modules during hot-reload."""
 
-    def __init__(self) -> None:
+    def __init__(self, ignore_patterns: list[str] | None = None) -> None:
         self.root = os.path.abspath(os.getcwd())
         self.venv_dir = os.path.join(self.root, ".venv")
-        self.ignore_patterns = self._load_ignore_patterns()
+        self.ignore_patterns = self._get_default_ignore_patterns()
+        if ignore_patterns:
+            self.ignore_patterns.extend(ignore_patterns)
 
-    def _load_ignore_patterns(self) -> list[str]:
-        """Load ignore patterns from pyproject.toml."""
-        patterns = [
+    def _get_default_ignore_patterns(self) -> list[str]:
+        """Return the default ignore patterns."""
+        return [
             "sprintest",
             "sprintest.*",
             "__main__",
             "sys",
             "builtins",
-        ]  # Default ignores
-        path = os.path.join(self.root, "pyproject.toml")
-        if os.path.exists(path):
-            try:
-                with open(path, "rb") as f:
-                    data = tomllib.load(f)
-                    user_patterns = (
-                        data.get("tool", {}).get("sprintest", {}).get("ignore", [])
-                    )
-                    if isinstance(user_patterns, list):
-                        patterns.extend(user_patterns)
-            except Exception as e:
-                logger.warning(f"Failed to load ignore patterns from {path}: {e}")
-        return patterns
+        ]
 
     def should_nuke(self, name: str, mod: Any, target_pkg: str | None) -> bool:
         """Determine if a module should be nuked."""

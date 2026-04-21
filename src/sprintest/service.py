@@ -1,10 +1,12 @@
 import asyncio
+import logging
 import threading
 from typing import Any
 
 from sprintest.context import DaemonContext
-from sprintest.logger import logger
 from sprintest.runner import NukeStrategy, TestRunner
+
+logger = logging.getLogger(__name__)
 
 
 class TestService:
@@ -15,7 +17,7 @@ class TestService:
     def __init__(self, context: DaemonContext) -> None:
         self.context = context
         self.test_runner = TestRunner()
-        self.nuke_strategy = NukeStrategy()
+        self.nuke_strategy = NukeStrategy(context.ignore_patterns)
         self.test_lock = threading.Lock()
         self.first_run = True
 

@@ -1,17 +1,20 @@
+import logging
 import os
 import subprocess
 import sys
 import time
 from collections.abc import Generator
 from contextlib import contextmanager
+from threading import Lock
 from typing import Any, cast
 
 import httpx
 
 from sprintest import constants
-from sprintest.logger import logger
 from sprintest.paths import ensure_sprintest_dir
 from sprintest.status import read_lock_pid, read_status
+
+logger = logging.getLogger(__name__)
 
 
 class RequestsShim:
@@ -39,6 +42,7 @@ class RequestsShim:
 class DaemonClient:
     def __init__(self, port: str = "8000"):
         self.default_port = port
+        self.internal_lock = Lock()
 
     def _check_health(self) -> bool:
         """Check if the daemon is responding to health checks."""
@@ -60,43 +64,44 @@ class DaemonClient:
         Uses the lock file as a "daemon is starting" sentinel so that a
         second concurrent call never spawns a duplicate process.
         """
-        # Already fully ready?
-        status = read_status()
-        if status:
-            return True
-
-        # Lock file present with a live PID means a daemon is in the middle
-        # of starting (it has acquired the lock but lifespan hasn't run yet).
-        # Skip spawning and just wait for status.json to appear.
-        alive_pid = read_lock_pid()
-        if not alive_pid:
-            logger.info("Starting Sprintest Daemon...")
-            ensure_sprintest_dir()
-            log_path = os.path.join(constants.SPRINTEST_DIR, constants.LOG_FILE)
-            log_file = open(log_path, "a")
-            subprocess.Popen(
-                [sys.executable, "-m", "sprintest.daemon"],
-                stdout=log_file,
-                stderr=log_file,
-                start_new_session=True,
-            )
-        else:
-            logger.debug(
-                f"Daemon (PID {alive_pid}) is starting, waiting for it to be ready..."
-            )
-
-        # status.json is written inside the daemon's FastAPI lifespan, which
-        # runs only after uvicorn has bound its socket and is ready to serve.
-        # Polling read_status() is therefore sufficient — no separate health
-        # check round-trip is needed.
-        for _ in range(constants.DAEMON_START_RETRIES):
-            time.sleep(constants.DAEMON_START_WAIT)
-            if read_status():
-                logger.info("Daemon started successfully!")
+        with self.internal_lock:
+            # Already fully ready?
+            status = read_status()
+            if status:
                 return True
 
-        logger.error("Daemon failed to start or respond within timeout.")
-        return False
+            # Lock file present with a live PID means a daemon is in the middle
+            # of starting (it has acquired the lock but lifespan hasn't run yet).
+            # Skip spawning and just wait for status.json to appear.
+            alive_pid = read_lock_pid()
+            if not alive_pid:
+                logger.info("Starting Sprintest Daemon...")
+                ensure_sprintest_dir()
+                log_path = os.path.join(constants.SPRINTEST_DIR, constants.LOG_FILE)
+                log_file = open(log_path, "a")
+                subprocess.Popen(
+                    [sys.executable, "-m", "sprintest.daemon"],
+                    stdout=log_file,
+                    stderr=log_file,
+                    start_new_session=True,
+                )
+            else:
+                logger.debug(
+                    f"Daemon (PID {alive_pid}) is starting, waiting for it to be ready..."
+                )
+
+            # status.json is written inside the daemon's FastAPI lifespan, which
+            # runs only after uvicorn has bound its socket and is ready to serve.
+            # Polling read_status() is therefore sufficient — no separate health
+            # check round-trip is needed.
+            for _ in range(constants.DAEMON_START_RETRIES):
+                time.sleep(constants.DAEMON_START_WAIT)
+                if read_status():
+                    logger.info("Daemon started successfully!")
+                    return True
+
+            logger.error("Daemon failed to start or respond within timeout.")
+            return False
 
     def _create_client(self, status: dict[str, Any]) -> httpx.Client:
         """Create an httpx.Client from status data."""
