@@ -9,6 +9,7 @@ import httpx
 from sprintest import constants
 from sprintest.client import DaemonClient
 from sprintest.discovery import find_target_pkg
+from sprintest.logger import setup_logger
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ def handle_run(client: DaemonClient, args: list[str], use_stream: bool) -> None:
 
 
 def main() -> None:
-    from sprintest.logger import setup_logger
+    
     setup_logger("sprintest")
 
     args = sys.argv[1:]

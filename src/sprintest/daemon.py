@@ -10,7 +10,6 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
-import psutil
 import uvicorn  # type: ignore
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse

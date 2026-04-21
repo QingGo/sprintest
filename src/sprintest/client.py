@@ -9,7 +9,6 @@ from threading import Lock
 from typing import Any, cast
 
 import httpx
-import psutil
 
 from sprintest import constants
 from sprintest.paths import ensure_sprintest_dir
