@@ -3,6 +3,7 @@ import logging
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -265,6 +266,60 @@ def acquire_daemon_lock(lock_path: str, internal_lock: threading.Lock) -> bool:
     return False
 
 
+def check_unix_socket_support(socket_path: str) -> bool:
+    """Check if the filesystem at socket_path supports Unix Domain Sockets."""
+    if not hasattr(socket, "AF_UNIX"):
+        return False
+
+    # Use a random suffix to avoid collisions during the check
+    test_path = f"{socket_path}.test.{os.getpid()}.{time.time()}"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.bind(test_path)
+        try:
+            os.remove(test_path)
+        except OSError as e:
+            logger.debug(f"Failed to remove test socket {test_path}: {e}")
+        return True
+    except (OSError, AttributeError) as e:
+        # If it's a permission error or something other than 'Operation not supported',
+        # we might still want to try using UDS later.
+        # 95 is EOPNOTSUPP on Linux
+        if getattr(e, "errno", None) == 95:
+            logger.debug(
+                f"Unix socket support explicitly not supported at {test_path}: {e}"
+            )
+            return False
+        # For other errors, assume it might work at the actual path
+        return True
+
+
+def force_remove_socket(path: str) -> None:
+    """Try very hard to remove a socket file, even if it's in a broken state."""
+    try:
+        if os.path.exists(path) or os.path.lexists(path):
+            os.remove(path)
+    except OSError as e:
+        logger.debug(f"Standard os.remove failed for {path}: {e}")
+        # Try calling system 'rm' as a fallback, which sometimes handles
+        # virtiofs/9p 'ghost' files better than Python's os.remove
+        # Find absolute path of 'rm' or default to /bin/rm
+        rm_path = "/bin/rm"
+        try:
+            subprocess.run([rm_path, "-f", path], check=False, capture_output=True)  # noqa: S603
+        except (OSError, subprocess.SubprocessError) as e_rm:
+            logger.debug(f"Failed to run '{rm_path} -f {path}': {e_rm}")
+
+        if os.path.exists(path) or os.path.lexists(path):
+            # Still exists? Try renaming it out of the way as a last resort
+            try:
+                stale_path = f"{path}.stale.{int(time.time())}"
+                os.rename(path, stale_path)
+                logger.debug(f"Renamed broken socket to {stale_path}")
+            except OSError as e_rename:
+                logger.debug(f"Failed to rename broken socket {path}: {e_rename}")
+
+
 def handle_exit(sig: int, frame: Any, state: DaemonState) -> None:
     """Signal handler: mark shutdown and exit via SystemExit."""
     logger.info(f"Daemon received signal {sig}, initiating graceful shutdown...")
@@ -292,76 +347,91 @@ def pre_load_package(context: DaemonContext) -> None:
                 )
             except ImportError as e:
                 logger.warning(f"Failed to pre-load {pkg_name}: {e}")
-
-
 def run() -> None:
     # Setup root logger for the daemon
     setup_logger("sprintest", is_daemon=True)
 
-    # Initialize the immutable context at the very start
+    # Initialize paths
     ensure_sprintest_dir()
-    use_unix = (
-        hasattr(socket, "AF_UNIX") and os.environ.get(constants.ENV_FORCE_TCP) != "1"
-    )
-
-    cwd = os.getcwd()
-    target_pkg = os.environ.get(constants.ENV_TARGET_PKG) or find_target_pkg()
-    ignore_patterns = load_config_patterns(cwd)
-
-    context = DaemonContext(
-        lock_path=get_lock_path(),
-        socket_path=get_socket_path() if use_unix else None,
-        status_path=get_status_path(),
-        cwd=cwd,
-        port=int(os.environ.get(constants.ENV_PORT, constants.DEFAULT_PORT)),
-        target_pkg=target_pkg,
-        target_pkg_path=os.environ.get(constants.ENV_TARGET_PKG_PATH),
-        version=constants.VERSION,
-        skip_uvicorn=os.environ.get(constants.ENV_SKIP_UVICORN) == "1",
-        ignore_patterns=ignore_patterns,
-    )
+    socket_path = get_socket_path()
+    lock_path = get_lock_path()
+    status_path = get_status_path()
 
     state = DaemonState()
 
-    if not acquire_daemon_lock(context.lock_path, state.internal_lock):
+    # 1. Acquire Lock
+    # We must acquire the lock BEFORE we try to manipulate the socket or status files.
+    if not acquire_daemon_lock(lock_path, state.internal_lock):
         logger.error(
             "Another instance of Sprintest Daemon is already running. Exiting."
         )
         sys.exit(1)
 
     try:
+        # 2. Decide Transport
+        use_unix = (
+            hasattr(socket, "AF_UNIX") and os.environ.get(constants.ENV_FORCE_TCP) != "1"
+        )
+
+        if use_unix:
+            # Check if filesystem supports UDS for new files
+            if not check_unix_socket_support(socket_path):
+                logger.warning(
+                    f"Filesystem at {os.path.dirname(socket_path)} does not support Unix sockets properly. Falling back to TCP mode."
+                )
+                use_unix = False
+            else:
+                # Try to clear the actual path. If it's a 'ghost' file that can't be removed, fallback.
+                force_remove_socket(socket_path)
+                if os.path.exists(socket_path) or os.path.lexists(socket_path):
+                    logger.warning(
+                        f"Found unremovable socket entry at {socket_path}. Falling back to TCP mode."
+                    )
+                    use_unix = False
+
+        # 3. Initialize the immutable context with the final transport decision
+        cwd = os.getcwd()
+        target_pkg = os.environ.get(constants.ENV_TARGET_PKG) or find_target_pkg()
+        ignore_patterns = load_config_patterns(cwd)
+
+        context = DaemonContext(
+            lock_path=lock_path,
+            socket_path=socket_path if use_unix else None,
+            status_path=status_path,
+            cwd=cwd,
+            port=int(os.environ.get(constants.ENV_PORT, constants.DEFAULT_PORT)),
+            target_pkg=target_pkg,
+            target_pkg_path=os.environ.get(constants.ENV_TARGET_PKG_PATH),
+            version=constants.VERSION,
+            skip_uvicorn=os.environ.get(constants.ENV_SKIP_UVICORN) == "1",
+            ignore_patterns=ignore_patterns,
+        )
+
         app = create_app(context, state)
 
+        # 4. Start Uvicorn
         try:
+
+            def exit_wrapper(sig: int, frame: Any) -> None:
+                handle_exit(sig, frame, state)
+
+            signal.signal(signal.SIGTERM, exit_wrapper)
+            signal.signal(signal.SIGINT, exit_wrapper)
+        except ValueError as e:
+            logger.debug(
+                f"Signal handling setup failed (expected if not in main thread): {e}"
+            )
+
+        if context.skip_uvicorn:
+            logger.info("Skipping Uvicorn startup as requested (test mode).")
+            while not state.shutdown_event.is_set():
+                time.sleep(0.1)
+            return
+
+        if context.socket_path:
+            logger.info(f"Starting Uvicorn on Unix socket: {context.socket_path}")
+            uds_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
-
-                def exit_wrapper(sig: int, frame: Any) -> None:
-                    handle_exit(sig, frame, state)
-
-                signal.signal(signal.SIGTERM, exit_wrapper)
-                signal.signal(signal.SIGINT, exit_wrapper)
-            except ValueError as e:
-                logger.debug(
-                    f"Signal handling setup failed (expected if not in main thread): {e}"
-                )
-
-            if context.skip_uvicorn:
-                logger.info("Skipping Uvicorn startup as requested (test mode).")
-                while not state.shutdown_event.is_set():
-                    time.sleep(0.1)
-                return
-
-            if context.socket_path:
-                # Remove stale socket if it exists
-                try:
-                    os.remove(context.socket_path)
-                except OSError as e:
-                    logger.debug(
-                        f"Note: Could not remove stale socket {context.socket_path}: {e}"
-                    )
-
-                logger.info(f"Starting Uvicorn on Unix socket: {context.socket_path}")
-                uds_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 uds_sock.bind(context.socket_path)
                 logger.debug(
                     f"Unix socket bound at {context.socket_path} (fd={uds_sock.fileno()})"
@@ -371,32 +441,60 @@ def run() -> None:
                     fd=uds_sock.fileno(),
                     log_level="warning",
                 )
-            else:
-                logger.info(f"Starting Uvicorn on port {context.port}")
-                # Ensure port is not None for type safety
-                p = context.port if context.port is not None else constants.DEFAULT_PORT
-                uvicorn.run(
-                    app,
-                    host=constants.DEFAULT_HOST,
-                    port=p,
-                    log_level="warning",
-                )
-        finally:
-            # Cleanup using immutable context paths
-            logger.info("Daemon exiting: releasing lock, socket, and status files.")
-            if context.socket_path:
-                remove_socket(context.socket_path)
-            remove_status(context.status_path)
-            abs_lock_path = os.path.abspath(context.lock_path)
-            try:
-                if os.path.exists(context.lock_path):
-                    os.remove(context.lock_path)
-                    logger.debug(f"Removing resource at absolute path: {abs_lock_path}")
             except OSError as e:
-                logger.error(f"Failed to remove lock file at {abs_lock_path}: {e}")
+                # If bind still fails with EOPNOTSUPP, we have no choice but to fallback
+                if e.errno == 95:
+                    logger.warning(
+                        f"Failed to bind Unix socket at {context.socket_path} even after cleanup: {e}. Last-resort fallback to TCP."
+                    )
+                    # Note: In this extremely rare case, status.json will say 'unix'
+                    # but we run on TCP. Re-creating app/context here is too risky.
+                    p = (
+                        context.port
+                        if context.port is not None
+                        else constants.DEFAULT_PORT
+                    )
+                    uvicorn.run(
+                        app,
+                        host=constants.DEFAULT_HOST,
+                        port=p,
+                        log_level="warning",
+                    )
+                else:
+                    raise
+        else:
+            logger.info(f"Starting Uvicorn on port {context.port}")
+            p = context.port if context.port is not None else constants.DEFAULT_PORT
+            uvicorn.run(
+                app,
+                host=constants.DEFAULT_HOST,
+                port=p,
+                log_level="warning",
+            )
     except Exception:
         logger.exception("Daemon startup failed unexpectedly")
         sys.exit(1)
+    finally:
+        # Cleanup: use the paths from context if available to handle path drift correctly.
+        # If context wasn't created, fallback to current environment-based paths.
+        logger.info("Daemon exiting: releasing lock, socket, and status files.")
+        
+        ctx = locals().get("context")
+        l_path = ctx.lock_path if ctx else get_lock_path()
+        s_path = (ctx.socket_path if ctx else None) or get_socket_path()
+        st_path = ctx.status_path if ctx else get_status_path()
+
+        if hasattr(socket, "AF_UNIX"):
+            remove_socket(s_path)
+        remove_status(st_path)
+
+        abs_lock_path = os.path.abspath(l_path)
+        try:
+            if os.path.exists(l_path):
+                os.remove(l_path)
+                logger.debug(f"Removing resource at absolute path: {abs_lock_path}")
+        except OSError as e:
+            logger.error(f"Failed to remove lock file at {abs_lock_path}: {e}")
 
 
 if __name__ == "__main__":

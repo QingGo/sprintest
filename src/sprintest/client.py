@@ -125,12 +125,16 @@ class DaemonClient:
                         return True
                 elif state == "loading":
                     now = time.time()
-                    if now - last_feedback > 2.0:
+                    if now - last_feedback > 10.0:
                         logger.info("Daemon is pre-loading packages, please wait...")
                         last_feedback = now
                     # As long as it's loading and alive, we continue the loop
                 else:
                     if self._check_health():
+                        now = time.time()
+                        if now - last_feedback > 10.0:
+                            logger.info("Daemon is busy, please wait...")
+                            last_feedback = now
                         return True
             else:
                 consecutive_missing_status += 1
