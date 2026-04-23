@@ -206,8 +206,8 @@ def acquire_daemon_lock(lock_path: str, internal_lock: threading.Lock) -> bool:
             )
             return True
         except FileExistsError:
+            logger.debug(f"Lock file {lock_path} already exists, checking if stale")
             # File already exists, continue to check if it's stale
-            pass
         except OSError as e:
             logger.error(f"Failed to create lock file at {lock_path}: {e}")
             return False
@@ -224,7 +224,9 @@ def acquire_daemon_lock(lock_path: str, internal_lock: threading.Lock) -> bool:
                     if content:
                         break
                 except FileNotFoundError:
-                    # Race condition: file was deleted just now.
+                    logger.debug(
+                        f"Lock file {lock_path} disappeared during read (race condition), retrying"
+                    )
                     break
                 time.sleep(0.01)  # Wait outside the lock
 
@@ -237,8 +239,10 @@ def acquire_daemon_lock(lock_path: str, internal_lock: threading.Lock) -> bool:
                         if os.path.exists(lock_path):
                             os.remove(lock_path)
                             logger.debug(f"Removing empty resource at path: {abs_path}")
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        logger.warning(
+                            f"Failed to remove empty lock file at {abs_path}: {e}"
+                        )
                 continue
 
             pid = int(content)
@@ -251,8 +255,10 @@ def acquire_daemon_lock(lock_path: str, internal_lock: threading.Lock) -> bool:
                         # For simplicity, we just try to remove it so we can retry.
                         os.remove(lock_path)
                         logger.debug(f"Removing stale resource at path: {abs_path}")
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        logger.warning(
+                            f"Failed to remove stale lock file at {abs_path}: {e}"
+                        )
                 continue
 
             # PID exists and is active, acquisition failed.

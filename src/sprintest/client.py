@@ -12,7 +12,13 @@ import httpx
 
 from sprintest import constants
 from sprintest.paths import ensure_sprintest_dir
-from sprintest.status import is_daemon_alive, read_lock_pid, read_status
+from sprintest.status import (
+    is_daemon_alive,
+    read_lock_pid,
+    read_status,
+    remove_socket,
+    remove_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +41,8 @@ class RequestsShim:
     def get(self, key: str, default: Any = None) -> Any:
         try:
             return self.response.json().get(key, default)
-        except (ValueError, TypeError, KeyError):
+        except (ValueError, TypeError, KeyError) as e:
+            logger.debug(f"Failed to parse JSON response for key '{key}': {e}")
             return default
 
 
@@ -78,6 +85,11 @@ class DaemonClient:
             alive_pid = read_lock_pid()
             spawned_pid = None
             if not alive_pid:
+                # Clean up any stale artifacts (socket, status) from a dead or
+                # zombie daemon before spawning a new one.
+                remove_socket()
+                remove_status()
+
                 logger.info("Starting Sprintest Daemon...")
                 ensure_sprintest_dir()
                 log_path = os.path.join(constants.SPRINTEST_DIR, constants.LOG_FILE)
