@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sprintest"
-version = "1.0.7"
+version = "1.0.8"
 description = "A C/S architecture test runner for heavy AI projects."
 authors = [
     { name = "QingGo", email = "zyqingjohn@qq.com" },
