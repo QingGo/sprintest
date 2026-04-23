@@ -22,7 +22,7 @@ test:
 	uv run stest tests
 
 format:
-	uv run ruff check src tests
+	uv run ruff check . --fix
 
 typecheck:
 	uv run mypy src
