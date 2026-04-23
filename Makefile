@@ -1,14 +1,14 @@
 # Sprintest Development Makefile
 
-.PHONY: test lint typecheck check clean stop benchmark help dev-reset test-stest-full test-daemon-full
+.PHONY: test format typecheck check clean stop benchmark help dev-reset test-stest-full test-daemon-full
 
 # Default target: show help
 help:
 	@echo "Sprintest Development Commands:"
 	@echo "  make test             - Run tests via stest (warm start if daemon is running)"
-	@echo "  make lint             - Run ruff linting (src and tests)"
+	@echo "  make format             - Run ruff linting (src and tests)"
 	@echo "  make typecheck        - Run mypy static type analysis"
-	@echo "  make check            - Full verification: lint -> typecheck -> test"
+	@echo "  make check            - Full verification: format -> typecheck -> test"
 	@echo "  make stop             - Gracefully stop the daemon via 'stest stop'"
 	@echo "  make clean            - Force kill daemon and remove .sprintest directory"
 	@echo "  make dev-reset        - Hard reset environment (clean) then run tests"
@@ -21,13 +21,13 @@ help:
 test:
 	uv run stest tests
 
-lint:
+format:
 	uv run ruff check src tests
 
 typecheck:
 	uv run mypy src
 
-check: lint typecheck test
+check: format typecheck test
 
 stop:
 	uv run stest stop

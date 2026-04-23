@@ -5,7 +5,7 @@ import sys
 import time
 from collections.abc import Generator
 from contextlib import contextmanager
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import Any, cast
 
 import httpx
@@ -47,6 +47,8 @@ class RequestsShim:
 
 
 class DaemonClient:
+    MONITOR_INTERVAL = 1.0
+
     def __init__(self, port: str = "8000"):
         self.default_port = port
         self.internal_lock = Lock()
@@ -291,11 +293,30 @@ class DaemonClient:
         status = read_status()
         if not status:
             raise RuntimeError("Daemon is reported as ready but status.json is missing.")
-            
+
+        daemon_pid = status.get("pid")
         client = self._create_client(status)
+        stop_monitor = Event()
+
+        if daemon_pid:
+            def monitor_daemon() -> None:
+                while not stop_monitor.wait(self.MONITOR_INTERVAL):
+                    if not is_daemon_alive(daemon_pid):
+                        logger.warning(
+                            f"Daemon (PID {daemon_pid}) died during streaming, "
+                            "aborting connection."
+                        )
+                        try:
+                            client.close()
+                        except (httpx.HTTPError, OSError) as _e:
+                            logger.debug(f"Error closing client after daemon death: {_e}")
+                        break
+            Thread(target=monitor_daemon, daemon=True).start()
+
         try:
             with client.stream("POST", "/v1/test/run/stream", json=payload) as resp:
                 resp.raise_for_status()
                 yield RequestsShim(resp)
         finally:
+            stop_monitor.set()
             client.close()

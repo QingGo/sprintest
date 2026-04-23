@@ -77,35 +77,19 @@ def create_app(context: DaemonContext, state: DaemonState) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-        start_time = time.time()
-        perf_start = time.perf_counter()
         config: dict[str, Any] = {
             "pid": os.getpid(),
             "version": context.version,
-            "start_time": start_time,
+            "start_time": time.time(),
             "cwd": context.cwd,
-            "status": "loading",
+            "status": "ready",
+            "ready_time": time.time(),
         }
         if context.socket_path:
             config.update({"type": "unix", "socket_path": context.socket_path})
         else:
             config.update({"type": "tcp", "port": context.port})
 
-        write_status(config, path=context.status_path)
-        logger.debug("status.json written — daemon is starting up.")
-
-        target_pkg = context.target_pkg
-        if target_pkg:
-            logger.info(f"Pre-loading package: {target_pkg}...")
-            pre_load_package(context)
-            duration = time.perf_counter() - perf_start
-            logger.info(f"Package pre-loading finished in {duration:.2f}s")
-        else:
-            logger.debug("No package specified for pre-loading.")
-
-        # Update status to ready
-        config["status"] = "ready"
-        config["ready_time"] = time.time()
         write_status(config, path=context.status_path)
         logger.info("Sprintest Daemon is ready to accept connections.")
         yield
@@ -413,9 +397,39 @@ def run() -> None:
             ignore_patterns=ignore_patterns,
         )
 
+        # 4. Pre-load package BEFORE socket creation.
+        # If importing the target package triggers a fork, the child process
+        # will NOT inherit the listen socket (since no socket exists yet),
+        # preventing duplicate request handling and zombie daemons.
+        perf_start = time.perf_counter()
+        config: dict[str, Any] = {
+            "pid": os.getpid(),
+            "version": context.version,
+            "start_time": time.time(),
+            "cwd": context.cwd,
+            "status": "loading",
+        }
+        if context.socket_path:
+            config["type"] = "unix"
+            config["socket_path"] = context.socket_path
+        else:
+            config["type"] = "tcp"
+            config["port"] = context.port
+        write_status(config, path=context.status_path)
+        logger.debug("status.json written — daemon is starting up.")
+
+        target_pkg = context.target_pkg
+        if target_pkg:
+            logger.info(f"Pre-loading package: {target_pkg}...")
+            pre_load_package(context)
+            duration = time.perf_counter() - perf_start
+            logger.info(f"Package pre-loading finished in {duration:.2f}s")
+        else:
+            logger.debug("No package specified for pre-loading.")
+
         app = create_app(context, state)
 
-        # 4. Start Uvicorn
+        # 5. Start Uvicorn
         try:
 
             def exit_wrapper(sig: int, frame: Any) -> None:

@@ -159,3 +159,68 @@ def test_concurrency_lock_atomicity(
         os.remove(get_lock_path())
     except OSError:
         pass
+
+
+def test_stream_monitor_starts_with_pid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify stream_test_run() starts a monitor thread when daemon PID is available.
+
+    The monitor thread is responsible for detecting daemon death during
+    streaming and aborting the connection early.
+    """
+    from unittest.mock import MagicMock, patch
+
+    client = DaemonClient(port="9999")
+    monkeypatch.setattr(client, "start_daemon", lambda: True)
+
+    mock_http = MagicMock(spec=httpx.Client)
+    mock_response = MagicMock(spec=httpx.Response)
+    mock_http.stream.return_value.__enter__.return_value = mock_response
+    monkeypatch.setattr(client, "_create_client", lambda s: mock_http)
+
+    initial_count = threading.active_count()
+
+    with patch("sprintest.client.read_status", return_value={
+        "pid": 42, "type": "tcp", "port": "9999", "status": "ready"
+    }):
+        with client.stream_test_run({"args": ["test.py"]}) as _:
+            # A daemon monitor thread should have been started
+            assert threading.active_count() == initial_count + 1, (
+                "Expected exactly one new thread for PID monitoring"
+            )
+
+    # After context manager exit, stop_monitor.set() stops the thread
+    time.sleep(0.01)
+    assert threading.active_count() == initial_count, (
+        "Monitor thread should have exited after stop_monitor.set()"
+    )
+
+
+def test_stream_monitor_detects_daemon_death(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify monitor thread calls client.close() when daemon dies mid-stream.
+
+    Uses a patched MONITOR_INTERVAL (10ms) so the test completes quickly
+    instead of waiting for the default 1s interval.
+    """
+    from unittest.mock import MagicMock, patch
+
+    client = DaemonClient(port="9999")
+    monkeypatch.setattr(client, "start_daemon", lambda: True)
+
+    mock_http = MagicMock(spec=httpx.Client)
+    mock_response = MagicMock(spec=httpx.Response)
+    mock_http.stream.return_value.__enter__.return_value = mock_response
+    monkeypatch.setattr(client, "_create_client", lambda s: mock_http)
+
+    with (
+        patch.object(DaemonClient, "MONITOR_INTERVAL", 0.01),
+        patch("sprintest.client.read_status", return_value={
+            "pid": 42, "type": "tcp", "port": "9999", "status": "ready"
+        }),
+        patch("sprintest.client.is_daemon_alive", return_value=False),
+    ):
+        with client.stream_test_run({"args": ["test.py"]}) as _:
+            pass
+
+        # Give the monitor a moment to detect death and call close()
+        time.sleep(0.05)
+        mock_http.close.assert_called()
