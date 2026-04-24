@@ -41,6 +41,11 @@
 
 Sprintest 采用解耦架构，确保即使在执行繁重的测试任务时，守护进程依然能快速响应。
 
+### 核心亮点新增
+- **🧹 CUDA 内存自动清理**：每次测试运行后自动调用 `torch.cuda.empty_cache()`，防止 GPU 内存累积导致的测试卡死。
+- **⏱️ 卡死检测与提醒**：测试输出静默超过 30 秒时自动向用户推送警告，避免误以为系统无响应。
+- **🛡️ Worker 子进程隔离**：测试运行在独立的 Worker 子进程中，即使测试进程因 OOM 或死锁而崩溃，Daemon 依然稳定运行并可自动重启 Worker。
+
 ### 系统架构图
 ```mermaid
 graph TD
@@ -48,11 +53,14 @@ graph TD
     subgraph "Daemon 进程"
         App --> Service["TestService (业务逻辑)"]
         Service -->|原子锁| Service
-        Service --> Nuke["NukeStrategy (模块清理)"]
-        Nuke -->|sys.modules 操作| PySys[sys.modules]
-        Service --> Runner["TestRunner (测试运行)"]
-        Runner -->|Pytest 执行| Tests["用户测试文件"]
+        Service --> Runner["TestRunner (Worker 管理)"]
     end
+    subgraph "Worker 子进程 (隔离运行)"
+        Worker["worker_main.py"] --> Nuke["NukeStrategy (模块清理 + CUDA 清理)"]
+        Nuke -->|sys.modules 操作| PySys[sys.modules]
+        Worker -->|"pytest.main()"| Tests["用户测试文件"]
+    end
+    Runner -->|启动 / 管理 / 重启| Worker
     App -.-> Status["status.json"]
     Client -.-> Status
 ```
@@ -63,30 +71,37 @@ sequenceDiagram
     participant C as "客户端 CLI"
     participant S as "status.json"
     participant D as "Daemon (FastAPI)"
-    participant N as "NukeStrategy"
     participant R as "TestRunner"
+    participant W as "Worker 子进程"
 
     C->>S: 读取状态
     alt Daemon 未运行
         C->>D: 启动 Daemon (子进程)
         D->>D: 获取 daemon.lock
         D->>D: 启动 Uvicorn
-        D->>S: 写入 status.json (Lifespan)
+        D->>S: 写入 status.json
         C->>S: 轮询直到就绪
     end
 
     C->>D: POST /v1/test/run/stream
     activate D
-    D->>D: 获取 test_lock
-    D->>N: nuke(target_pkg) (执行清理)
-    N-->>D: 模块已卸载
+    D->>D: 获取 test_lock (asyncio)
     D->>R: run_tests(args)
-    R->>R: 重定向标准输出/错误
-    R->>R: 执行 pytest.main()
-    R-->>D: 返回退出码和输出
-    D->>N: nuke_tests() (清理测试模块)
-    N-->>D: 测试模块已移除
+    activate R
+    R->>R: 惰性启动 Worker (如未启动)
+    activate W
+    Note over W: Worker 预加载重型依赖<br/>(torch, transformers, ...)
+    W-->>R: {"type": "ready"}
+    R->>W: {"type": "run_test", args, nuke}
+    W->>W: NukeStrategy (模块清理)
+    W->>W: torch.cuda.empty_cache()
+    W->>W: pytest.main() (输出重定向)
+    W-->>R: 流式输出 (JSON Lines)
+    Note over R: 卡死检测：30 秒无输出<br/>则向用户推送警告
+    R-->>D: 流式输出
     D-->>C: 流式返回结果
+    deactivate W
+    deactivate R
     deactivate D
     C->>C: 输出结果并退出
 ```

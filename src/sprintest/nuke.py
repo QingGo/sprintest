@@ -8,6 +8,11 @@ import shutil
 import sys
 from typing import Any
 
+try:
+    import torch
+except ImportError:
+    torch = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 
@@ -104,7 +109,22 @@ class NukeStrategy(BaseNukeStrategy):
         for d in pycache_dirs:
             shutil.rmtree(d, ignore_errors=True)
 
+        # Best-effort CUDA memory cleanup
+        self._cleanup_cuda()
+
         return len(modules_to_delete)
+
+    def _cleanup_cuda(self) -> None:
+        """Release GPU memory held by PyTorch (if CUDA is available)."""
+        if torch is None:
+            return
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                logger.debug("CUDA cache emptied after nuke")
+        except Exception:  # noqa: BLE001
+            logger.warning("CUDA cleanup failed", exc_info=True)
 
     def nuke_tests(self) -> None:
         """Specifically nuke test modules to ensure fresh collection."""

@@ -19,6 +19,11 @@ def test_stale_status_recovery(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -
     remove_status()
     remove_socket()
 
+    # Make is_daemon_alive return True so the mock-written status passes
+    # read_status() validation (the test process PID is not a sprintest daemon)
+    import sprintest.status as sprintest_status
+    monkeypatch.setattr(sprintest_status, "is_daemon_alive", lambda pid: True)
+
     # Create a fake status file with a PID that is likely not running
     fake_pid = 999999
     write_status(
@@ -117,7 +122,7 @@ def test_isolation_via_env_var(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -
     assert path == str(custom_dir)
     assert custom_dir.exists()
 
-    write_status({"test": "data", "pid": os.getpid()})
+    write_status({"test": "data"})
     status_file = custom_dir / constants.STATUS_FILE
     assert status_file.exists()
 
@@ -135,8 +140,14 @@ def test_concurrency_lock_atomicity(
 
     from threading import Lock
 
+    # Make is_daemon_alive return True so that threads recognize the
+    # lock-holding process as alive (not a stale lock).
+    # acquire_daemon_lock imported is_daemon_alive at module load time,
+    # so we patch it in sprintest.daemon's namespace.
+    import sprintest.daemon as sprintest_daemon
     from sprintest.daemon import acquire_daemon_lock
     from sprintest.paths import get_lock_path
+    monkeypatch.setattr(sprintest_daemon, "is_daemon_alive", lambda pid: True)
 
     lock = Lock()
     results: list[bool] = []

@@ -15,6 +15,9 @@ def setup_logger(name: str = "sprintest", is_daemon: bool = False) -> logging.Lo
     level = getattr(logging, level_str, logging.INFO)
     logger.setLevel(level)
 
+    # Prevent propagation to avoid duplicate output when root logger has handlers
+    logger.propagate = False
+
     # Formatter
     formatter = logging.Formatter(
         fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -43,7 +46,5 @@ def setup_logger(name: str = "sprintest", is_daemon: bool = False) -> logging.Lo
                 logger.addHandler(file_handler)
             except OSError as e:
                 logger.warning(f"Failed to setup file logging: {e}")
-
-    return logger
 
     return logger

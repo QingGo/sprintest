@@ -1,5 +1,4 @@
 import errno
-import importlib
 import logging
 import os
 import shutil
@@ -20,7 +19,7 @@ from pydantic import BaseModel
 
 from sprintest import constants
 from sprintest.context import DaemonContext
-from sprintest.discovery import discover_package_path, find_target_pkg
+from sprintest.discovery import find_target_pkg
 from sprintest.logger import setup_logger
 from sprintest.paths import (
     ensure_sprintest_dir,
@@ -326,26 +325,6 @@ def handle_exit(sig: int, frame: Any, state: DaemonState) -> None:
     sys.exit(0)
 
 
-def pre_load_package(context: DaemonContext) -> None:
-    """Pre-load the target package if specified or auto-discoverable."""
-    if context.cwd not in sys.path:
-        sys.path.insert(0, context.cwd)
-
-    target_pkg = context.target_pkg
-    if target_pkg:
-        pkg_name = target_pkg.replace("-", "_")
-        target_pkg_path = context.target_pkg_path or discover_package_path(target_pkg)
-
-        if target_pkg_path:
-            if target_pkg_path not in sys.path:
-                sys.path.insert(0, target_pkg_path)
-            try:
-                importlib.import_module(pkg_name)
-                logger.info(
-                    f"Successfully pre-loaded package: {pkg_name} from {target_pkg_path}"
-                )
-            except ImportError as e:
-                logger.warning(f"Failed to pre-load {pkg_name}: {e}")
 def run() -> None:
     # Setup root logger for the daemon
     setup_logger("sprintest", is_daemon=True)
@@ -423,11 +402,6 @@ def run() -> None:
             ignore_patterns=ignore_patterns,
         )
 
-        # 4. Pre-load package BEFORE socket creation.
-        # If importing the target package triggers a fork, the child process
-        # will NOT inherit the listen socket (since no socket exists yet),
-        # preventing duplicate request handling and zombie daemons.
-        perf_start = time.perf_counter()
         config: dict[str, Any] = {
             "pid": os.getpid(),
             "version": context.version,
@@ -444,15 +418,6 @@ def run() -> None:
             config["port"] = p
         write_status(config, path=context.status_path)
         logger.debug("status.json written — daemon is starting up.")
-
-        target_pkg = context.target_pkg
-        if target_pkg:
-            logger.info(f"Pre-loading package: {target_pkg}...")
-            pre_load_package(context)
-            duration = time.perf_counter() - perf_start
-            logger.info(f"Package pre-loading finished in {duration:.2f}s")
-        else:
-            logger.debug("No package specified for pre-loading.")
 
         app = create_app(context, state)
 

@@ -1,12 +1,11 @@
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from sprintest.context import DaemonContext
 from sprintest.daemon import create_app
-from sprintest.service import TestService
 from sprintest.state import DaemonState
 
 
@@ -69,39 +68,15 @@ def test_api_run_test_busy(client: TestClient, app: Any) -> None:
         assert "Another test is already running" in response.json()["detail"]
 
 
-# def test_pre_load_logic(tmp_path: Any) -> None:
-#     """Test the pre-load logic in run() function"""
-#     from unittest.mock import patch
-
-#     with (
-#         patch.dict(
-#             "os.environ",
-#             {
-#                 "SPRINTEST_TARGET_PKG": "sprintest",
-#                 "SPRINTEST_PORT": "8000",
-#                 "SPRINTEST_FORCE_TCP": "1",
-#                 "SPRINTEST_SKIP_UVICORN": "1",
-#                 "SPRINTEST_LOCK_FILE": os.path.join(tmp_path, "test_daemon.lock"),
-#                 "SPRINTEST_DIR": tempfile.TemporaryDirectory(prefix="sprintest_test_").name,
-#             },
-#         ),
-#         patch("importlib.import_module") as mock_import,
-#         patch("sprintest.daemon.acquire_daemon_lock", return_value=True),
-#     ):
-#         from sprintest.daemon import run, stop
-
-#         run()
-
 def test_run_preloads_before_app(tmp_path: Any) -> None:
-    """Verify run() calls write_status -> pre_load_package -> create_app in order.
+    """Verify run() calls write_status -> create_app in order.
 
-    This validates the Fix 1 behavioral contract: pre-load happens BEFORE
-    socket creation (create_app), and status.json is written before pre-load
-    to signal the client to wait.
+    Pre-loading has been moved to the worker sub-process (worker_main.py),
+    so the daemon's run() only calls write_status then create_app.
     """
     import threading
     from threading import Thread
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
 
     from sprintest.daemon import run
 
@@ -122,14 +97,9 @@ def test_run_preloads_before_app(tmp_path: Any) -> None:
             },
         ),
         patch("sprintest.daemon.acquire_daemon_lock", return_value=True),
-        patch("sprintest.daemon.discover_package_path", return_value=str(tmp_path)),
         patch(
             "sprintest.daemon.write_status",
             side_effect=lambda d, path=None: call_order.append("write_status"),
-        ),
-        patch(
-            "sprintest.daemon.pre_load_package",
-            side_effect=lambda ctx: call_order.append("pre_load_package"),
         ),
         patch(
             "sprintest.daemon.create_app",
@@ -143,42 +113,9 @@ def test_run_preloads_before_app(tmp_path: Any) -> None:
         thread.join(timeout=0.5)
 
     status_idx = call_order.index("write_status")
-    preload_idx = call_order.index("pre_load_package")
     app_idx = call_order.index("create_app")
-    assert status_idx < preload_idx, (
+    assert status_idx < app_idx, (
         f"write_status ({status_idx}) should be before "
-        f"pre_load_package ({preload_idx})"
-    )
-    assert preload_idx < app_idx, (
-        f"pre_load_package ({preload_idx}) should be before "
         f"create_app ({app_idx})"
     )
 
-
-def test_pre_load_package_imports_package(tmp_path: Any) -> None:
-    """Verify pre_load_package() calls importlib.import_module.
-
-    This validates that the daemon actually imports the target
-    package during the pre-load phase.
-    """
-    from unittest.mock import patch
-
-    from sprintest.context import DaemonContext
-    from sprintest.daemon import pre_load_package
-
-    context = DaemonContext(
-        lock_path=str(tmp_path / "lock"),
-        socket_path=None,
-        status_path=str(tmp_path / "status.json"),
-        cwd=".",
-        port=19999,
-        target_pkg="sprintest",
-        target_pkg_path=str(tmp_path),
-        version="test",
-        skip_uvicorn=True,
-        ignore_patterns=[],
-    )
-
-    with patch("sprintest.daemon.importlib.import_module") as mock_import:
-        pre_load_package(context)
-        mock_import.assert_called_once_with("sprintest")

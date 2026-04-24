@@ -41,6 +41,11 @@ For AI/ML projects with heavy dependencies (`torch`, `transformers`, etc.), Spri
 
 Sprintest uses a decoupled architecture to ensure the daemon remains responsive even when running heavy tests.
 
+### New Highlights
+- **🧹 Automatic CUDA Memory Cleanup**: Calls `torch.cuda.empty_cache()` after every test run to prevent GPU memory accumulation that could freeze the daemon.
+- **⏱️ Stuck Detection & Warning**: Automatically warns the user if test output is silent for more than 30 seconds, preventing confusion when tests appear stuck.
+- **🛡️ Worker Subprocess Isolation**: Tests run in a dedicated worker subprocess. Even if the worker crashes (OOM, deadlock), the daemon stays stable and auto-restarts the worker.
+
 ### System Architecture
 ```mermaid
 graph TD
@@ -48,11 +53,14 @@ graph TD
     subgraph "Daemon Process"
         App --> Service["TestService"]
         Service -->|Atomic Lock| Service
-        Service --> Nuke["NukeStrategy"]
-        Nuke -->|Module Unloading| PySys[sys.modules]
-        Service --> Runner["TestRunner"]
-        Runner -->|Pytest execution| Tests["User Tests"]
+        Service --> Runner["TestRunner (Worker Manager)"]
     end
+    subgraph "Worker Subprocess (Isolated)"
+        Worker["worker_main.py"] --> Nuke["NukeStrategy + CUDA Cleanup"]
+        Nuke -->|Module Unloading| PySys[sys.modules]
+        Worker -->|"pytest.main()"| Tests["User Tests"]
+    end
+    Runner -->|Spawn / Manage / Restart| Worker
     App -.-> Status["status.json"]
     Client -.-> Status
 ```
@@ -63,30 +71,37 @@ sequenceDiagram
     participant C as "Client CLI"
     participant S as "status.json"
     participant D as "Daemon (FastAPI)"
-    participant N as "NukeStrategy"
     participant R as "TestRunner"
+    participant W as "Worker Subprocess"
 
     C->>S: Read status
     alt Daemon not running
         C->>D: Start Daemon (subprocess)
         D->>D: Acquire daemon.lock
         D->>D: Start Uvicorn
-        D->>S: Write status (lifespan)
+        D->>S: Write status
         C->>S: Poll until ready
     end
 
     C->>D: POST /v1/test/run/stream
     activate D
-    D->>D: Acquire test_lock
-    D->>N: nuke(target_pkg)
-    N-->>D: Modules unloaded
+    D->>D: Acquire test_lock (asyncio)
     D->>R: run_tests(args)
-    R->>R: Redirect stdout/stderr
-    R->>R: pytest.main()
-    R-->>D: Exit code & Output
-    D->>N: nuke_tests()
-    N-->>D: Test modules cleared
+    activate R
+    R->>R: Lazy-spawn Worker (if not running)
+    activate W
+    Note over W: Worker pre-loads heavy deps<br/>(torch, transformers, ...)
+    W-->>R: {"type": "ready"}
+    R->>W: {"type": "run_test", args, nuke}
+    W->>W: NukeStrategy
+    W->>W: torch.cuda.empty_cache()
+    W->>W: pytest.main() (captured output)
+    W-->>R: Streaming output (JSON Lines)
+    Note over R: Stuck detection: warn user<br/>after 30s of silence
+    R-->>D: Streaming output
     D-->>C: Stream results
+    deactivate W
+    deactivate R
     deactivate D
     C->>C: Print output & exit
 ```
