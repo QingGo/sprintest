@@ -16,8 +16,15 @@ def ensure_sprintest_dir() -> str:
 
 
 def get_socket_path() -> str:
-    """Get the Unix socket file path."""
-    return os.path.join(get_sprintest_dir(), constants.SOCKET_NAME)
+    """Get the Unix socket file path.
+
+    On Windows, ``os.path.join`` produces backslash separators which
+    do not work with ``socket.AF_UNIX`` (POSIX convention requires
+    forward slashes).  We normalise the path so that it always uses
+    forward slashes.
+    """
+    path = os.path.join(get_sprintest_dir(), constants.SOCKET_NAME)
+    return path.replace("\\", "/")
 
 
 def get_status_path() -> str:

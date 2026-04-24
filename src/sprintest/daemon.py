@@ -1,6 +1,8 @@
+import errno
 import importlib
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -85,10 +87,11 @@ def create_app(context: DaemonContext, state: DaemonState) -> FastAPI:
             "status": "ready",
             "ready_time": time.time(),
         }
-        if context.socket_path:
+        if state.transport_mode == "unix":
             config.update({"type": "unix", "socket_path": context.socket_path})
         else:
-            config.update({"type": "tcp", "port": context.port})
+            p = context.port if context.port is not None else constants.DEFAULT_PORT
+            config.update({"type": "tcp", "port": p})
 
         write_status(config, path=context.status_path)
         logger.info("Sprintest Daemon is ready to accept connections.")
@@ -274,8 +277,7 @@ def check_unix_socket_support(socket_path: str) -> bool:
     except (OSError, AttributeError) as e:
         # If it's a permission error or something other than 'Operation not supported',
         # we might still want to try using UDS later.
-        # 95 is EOPNOTSUPP on Linux
-        if getattr(e, "errno", None) == 95:
+        if getattr(e, "errno", None) == errno.EOPNOTSUPP:
             logger.debug(
                 f"Unix socket support explicitly not supported at {test_path}: {e}"
             )
@@ -290,24 +292,31 @@ def force_remove_socket(path: str) -> None:
         if os.path.exists(path) or os.path.lexists(path):
             os.remove(path)
     except OSError as e:
-        logger.debug(f"Standard os.remove failed for {path}: {e}")
+        logger.warning(f"Standard os.remove failed for {path}: {e}")
         # Try calling system 'rm' as a fallback, which sometimes handles
-        # virtiofs/9p 'ghost' files better than Python's os.remove
-        # Find absolute path of 'rm' or default to /bin/rm
-        rm_path = "/bin/rm"
-        try:
-            subprocess.run([rm_path, "-f", path], check=False, capture_output=True)  # noqa: S603
-        except (OSError, subprocess.SubprocessError) as e_rm:
-            logger.debug(f"Failed to run '{rm_path} -f {path}': {e_rm}")
+        # virtiofs/9p 'ghost' files better than Python's os.remove.
+        # Use shutil.which for cross-platform lookup (Windows has no /bin/rm).
+        rm_path = shutil.which("rm")
+        if rm_path:
+            try:
+                subprocess.run(  # noqa: S603
+                    [rm_path, "-f", path], check=False, capture_output=True
+                )
+            except (OSError, subprocess.SubprocessError) as e_rm:
+                logger.warning(f"Failed to run '{rm_path} -f {path}': {e_rm}")
+        else:
+            logger.debug(
+                "'rm' not available on this platform, skipping aggressive socket cleanup"
+            )
 
         if os.path.exists(path) or os.path.lexists(path):
             # Still exists? Try renaming it out of the way as a last resort
             try:
                 stale_path = f"{path}.stale.{int(time.time())}"
                 os.rename(path, stale_path)
-                logger.debug(f"Renamed broken socket to {stale_path}")
+                logger.warning(f"Renamed broken socket to {stale_path} (original path still occupied)")
             except OSError as e_rename:
-                logger.debug(f"Failed to rename broken socket {path}: {e_rename}")
+                logger.warning(f"Failed to rename broken socket {path}: {e_rename}")
 
 
 def handle_exit(sig: int, frame: Any, state: DaemonState) -> None:
@@ -379,6 +388,23 @@ def run() -> None:
                     )
                     use_unix = False
 
+        # Record runtime transport mode so the lifespan (and pre-load status write)
+        # can produce a correct status.json even after a bind-failure fallback.
+        state.transport_mode = "unix" if use_unix else "tcp"
+
+        # Determine port for TCP mode: auto-find a free port when user didn't
+        # specify one explicitly.  This avoids port conflicts when running
+        # multiple daemon instances (e.g. during tests).
+        port: int | None = None
+        port_str = os.environ.get(constants.ENV_PORT)
+        if port_str:
+            port = int(port_str)
+        elif state.transport_mode == "tcp":
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("", 0))
+                port = int(s.getsockname()[1])
+            logger.info(f"Auto-selected free TCP port: {port}")
+
         # 3. Initialize the immutable context with the final transport decision
         cwd = os.getcwd()
         target_pkg = os.environ.get(constants.ENV_TARGET_PKG) or find_target_pkg()
@@ -389,7 +415,7 @@ def run() -> None:
             socket_path=socket_path if use_unix else None,
             status_path=status_path,
             cwd=cwd,
-            port=int(os.environ.get(constants.ENV_PORT, constants.DEFAULT_PORT)),
+            port=port,
             target_pkg=target_pkg,
             target_pkg_path=os.environ.get(constants.ENV_TARGET_PKG_PATH),
             version=constants.VERSION,
@@ -409,12 +435,13 @@ def run() -> None:
             "cwd": context.cwd,
             "status": "loading",
         }
-        if context.socket_path:
+        if state.transport_mode == "unix":
             config["type"] = "unix"
             config["socket_path"] = context.socket_path
         else:
             config["type"] = "tcp"
-            config["port"] = context.port
+            p = context.port if context.port is not None else constants.DEFAULT_PORT
+            config["port"] = p
         write_status(config, path=context.status_path)
         logger.debug("status.json written — daemon is starting up.")
 
@@ -462,13 +489,11 @@ def run() -> None:
                     log_level="warning",
                 )
             except OSError as e:
-                # If bind still fails with EOPNOTSUPP, we have no choice but to fallback
-                if e.errno == 95:
+                if e.errno == errno.EOPNOTSUPP:
                     logger.warning(
                         f"Failed to bind Unix socket at {context.socket_path} even after cleanup: {e}. Last-resort fallback to TCP."
                     )
-                    # Note: In this extremely rare case, status.json will say 'unix'
-                    # but we run on TCP. Re-creating app/context here is too risky.
+                    state.transport_mode = "tcp"
                     p = (
                         context.port
                         if context.port is not None

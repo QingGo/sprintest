@@ -96,11 +96,18 @@ class DaemonClient:
                 ensure_sprintest_dir()
                 log_path = os.path.join(constants.SPRINTEST_DIR, constants.LOG_FILE)
                 log_file = open(log_path, "a")
+
+                popen_kwargs: dict[str, Any] = {}
+                if sys.platform == "win32":
+                    popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+                else:
+                    popen_kwargs["start_new_session"] = True
+
                 proc = subprocess.Popen(
                     [sys.executable, "-m", "sprintest.daemon"],
                     stdout=log_file,
                     stderr=log_file,
-                    start_new_session=True,
+                    **popen_kwargs,
                 )
                 spawned_pid = proc.pid
             else:

@@ -28,8 +28,9 @@ def test_daemon_path_drift_resilience(tmp_path: Any) -> None:
 
     env = os.environ.copy()
     env["SPRINTEST_DIR"] = str(original_dir)
-    env["SPRINTEST_FORCE_TCP"] = "1"  # Use TCP for simpler interaction
-    env["SPRINTEST_PORT"] = "8001"    # Use a different port to avoid conflict
+    env["SPRINTEST_FORCE_TCP"] = "1"
+    # Remove SPRINTEST_PORT if inherited, so daemon auto-finds a free port
+    env.pop("SPRINTEST_PORT", None)
 
     # Start the daemon
     proc = subprocess.Popen(
@@ -42,19 +43,29 @@ def test_daemon_path_drift_resilience(tmp_path: Any) -> None:
     )
 
     try:
-        # Wait for daemon to create resources
-        status_file = original_dir / "status.json"
-        start_time = time.time()
-        while not status_file.exists():
-            if time.time() - start_time > 10:
-                stdout, stderr = proc.communicate()
-                pytest.fail(f"Daemon failed to start. Stderr: {stderr}")
-            time.sleep(0.1)
-
         import json
 
-        status = json.loads(status_file.read_text())
-        port = status["port"]
+        # Wait for daemon to reach 'ready' status (not just file existence).
+        # 'ready' is written by the lifespan after uvicorn binds the port,
+        # so we know the server is accepting connections.
+        status_file = original_dir / "status.json"
+        start_time = time.time()
+        port: int | None = None
+        while True:
+            if status_file.exists():
+                status = json.loads(status_file.read_text())
+                if status.get("status") == "ready":
+                    port = status["port"]
+                    break
+            if time.time() - start_time > 15:
+                stdout, stderr = proc.communicate()
+                details = ""
+                if status_file.exists():
+                    details = f"Last status: {status_file.read_text()}"
+                pytest.fail(
+                    f"Daemon failed to become ready. Stderr: {stderr}\n{details}"
+                )
+            time.sleep(0.1)
 
         # 2. Run a "nasty" test that tries to derail the daemon
         nasty_test = tmp_path / "test_nasty.py"
